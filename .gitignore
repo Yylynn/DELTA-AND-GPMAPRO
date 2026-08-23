@@ -6,6 +6,8 @@ __pycache__/
 frontend/node_modules/
 frontend/dist/
 .env
+.env.*
+!.env.example
 data/imported/*
 !data/imported/.gitkeep
 data/cache/*
@@ -14,13 +16,23 @@ data/news_cache/*
 !data/news_cache/.gitkeep
 data/news_history/*
 !data/news_history/.gitkeep
+data/news_factor_snapshots/
+data/news_research_history/
 data/futu_snapshots/
 data/gpmapro_trace/
+data/gpma2_trace/
+data/gpmaapro_trace/
 data/market_volatility_alerts/
 data/strategy_lab_runs/
+data/itd_config.json
 tmp/
 *.egg-info/
 .ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+coverage/
+*.log
 build/
 dist/
 *.spec
@@ -28,3 +40,4 @@ dist/
 .idea/
 Thumbs.db
 Desktop.ini
+.DS_Store
