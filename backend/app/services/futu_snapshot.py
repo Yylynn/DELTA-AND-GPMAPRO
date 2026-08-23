@@ -18,6 +18,7 @@ from app.data.providers import validate_ohlcv
 
 
 class FutuOpenDError(RuntimeError):
+    """Raised when the local, read-only OpenD data path is unavailable."""
     pass
 
 
@@ -44,6 +45,34 @@ class FutuSnapshotService:
         except OSError as error:
             raise FutuOpenDError(f"OpenD is unavailable at {self.host}:{self.port}; start OpenD and confirm API port 11111: {error}") from error
 
+    def connection_status(self) -> dict:
+        """Return a fast, non-raising status snapshot for the local status page."""
+        try:
+            with socket.create_connection((self.host, self.port), timeout=.25):
+                connected, error = True, None
+        except OSError as reason:
+            connected, error = False, str(reason)
+        manifests = self.list()
+        latest = manifests[0] if manifests else None
+        try:
+            import futu
+            sdk_version = getattr(futu, "__version__", "unknown")
+        except ImportError:
+            sdk_version = "not_installed"
+        return {
+            "connected": connected,
+            "connection_check": "tcp_endpoint_probe",
+            "connection_status": "ENDPOINT_REACHABLE" if connected else "ENDPOINT_UNREACHABLE",
+            "host": self.host,
+            "port": self.port,
+            "sdk_version": sdk_version,
+            "last_success_at": latest.get("fetched_at") if latest else None,
+            "last_snapshot_at": latest.get("fetched_at") if latest else None,
+            "last_snapshot_id": latest.get("snapshot_id") if latest else None,
+            "snapshot_count": len(manifests),
+            "error": error,
+        }
+
     def load(self, snapshot_id: str) -> tuple[pd.DataFrame, dict]:
         if not re.fullmatch(r"[A-Za-z0-9_.-]+", snapshot_id):
             raise FileNotFoundError(snapshot_id)
@@ -55,10 +84,13 @@ class FutuSnapshotService:
         frame, quality = validate_ohlcv(pd.read_csv(csv_path))
         # Legacy snapshots predate explicit hashes.  Derive the hash in memory
         # without rewriting their immutable manifest, so they remain auditable.
-        data_sha256 = manifest.get("data_sha256") or hashlib.sha256(
+        actual_sha256 = hashlib.sha256(
             frame.to_csv(index=False, lineterminator="\n").encode("utf-8")
         ).hexdigest()
-        return frame, {**quality, **manifest, "data_sha256": data_sha256, "source": "futu_opend_snapshot"}
+        expected_sha256 = manifest.get("data_sha256")
+        if expected_sha256 and expected_sha256 != actual_sha256:
+            raise ValueError("SNAPSHOT_INTEGRITY_ERROR: CSV content does not match manifest SHA-256")
+        return frame, {**quality, **manifest, "data_sha256": actual_sha256, "source": "futu_opend_snapshot"}
 
     def quota(self) -> dict:
         self._ensure_endpoint()

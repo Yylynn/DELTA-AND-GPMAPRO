@@ -17,14 +17,14 @@ from app.services.data_freshness import freshness_snapshot
 from app.services.event_backtest import EventBacktestService
 from app.services.gpmapro_engine import GpmaProEngine
 from app.services.volume_monitor import VolumeMonitor
-from app.services.news import NewsService
+from app.services.news_runtime import get_news_service
 
 
 class EvidenceEngine:
     def __init__(self, config: EvidenceConfig = EVIDENCE_CONFIG):
         self.config = config
         self.gpma, self.volume, self.backtest = GpmaProEngine(), VolumeMonitor(), EventBacktestService()
-        self.news = NewsService(Path(__file__).resolve().parents[3] / "data" / "news_cache")
+        self.news = get_news_service()
 
     def _item(self, *, id: str, source: str, category: str, label: str, direction: str, strength: float, confidence: float, status: str, as_of: str, details: dict | None = None) -> EvidenceItem:
         return EvidenceItem(id=id, source=source, category=category, label=label, direction=direction, strength=round(max(0, min(1, strength)), 4), confidence=round(max(0, min(1, confidence)), 4), weight=self.config.weights[source], status=status, as_of=as_of, details=details or {})
@@ -42,10 +42,12 @@ class EvidenceEngine:
         generated = [type("Window", (), item) for item in ITDDeltaEngine().signal_windows(bars)]
         for window in [*generated, *manual]:
             published_at = date.fromisoformat(str(window.metadata.get("published_at") or window.anchor_date))
-            if published_at < as_of and window.window_start <= as_of <= window.window_end:
+            window_start = window.window_start if isinstance(window.window_start, date) else date.fromisoformat(str(window.window_start))
+            window_end = window.window_end if isinstance(window.window_end, date) else date.fromisoformat(str(window.window_end))
+            if published_at < as_of and window_start <= as_of <= window_end:
                 event_type = window.event_type.value if hasattr(window.event_type, "value") else str(window.event_type)
                 direction = "BULLISH" if event_type == "LOW" else "BEARISH"
-                results.append(self._item(id=f"delta_{window.event_id}", source="DELTA", category="TIME", label=f"DELTA {event_type.lower()} window active", direction=direction, strength=.8, confidence=window.confidence, status="ACTIVE", as_of=as_of.isoformat(), details={"event_type": event_type, "published_at": published_at.isoformat(), "window_start": window.window_start.isoformat(), "window_end": window.window_end.isoformat(), "source": window.source}))
+                results.append(self._item(id=f"delta_{window.event_id}", source="DELTA", category="TIME", label=f"DELTA {event_type.lower()} window active", direction=direction, strength=.8, confidence=window.confidence, status="ACTIVE", as_of=as_of.isoformat(), details={"event_type": event_type, "published_at": published_at.isoformat(), "window_start": window_start.isoformat(), "window_end": window_end.isoformat(), "source": window.source}))
         return results
 
     def _gpmapro(self, bars: pd.DataFrame, as_of: str) -> list[EvidenceItem]:

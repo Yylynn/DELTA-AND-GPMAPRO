@@ -36,6 +36,7 @@ class VolumeMonitor:
 
     def snapshot(self, bars: pd.DataFrame, symbol: str, timeframe: str, as_of: str | None = None) -> dict:
         data = self.calculate(bars, as_of); row = data.iloc[-1]; previous = data.iloc[-2] if len(data) > 1 else None; rvol = float(row.relative_volume)
+        if not np.isfinite(rvol): raise ValueError("Volume Monitor requires a positive volume baseline")
         level = "VERY_LOW" if rvol < self.config.very_low_rvol else "LOW" if rvol < self.config.low_rvol else "NORMAL" if rvol < self.config.high_rvol else "HIGH" if rvol < self.config.very_high_rvol else "VERY_HIGH"
         ma_ratio = float(row.volume_ma5 / row.volume_ma20) if row.volume_ma20 else np.nan
         trend = "EXPANDING" if ma_ratio >= self.config.expanding_ratio else "CONTRACTING" if ma_ratio <= self.config.contracting_ratio else "STABLE"
@@ -45,8 +46,8 @@ class VolumeMonitor:
         direction = "UP" if price_change is not None and price_change > 0 else "DOWN" if price_change is not None and price_change < 0 else "FLAT"
         context = "UP_ON_HIGH_VOLUME" if direction == "UP" and rvol >= self.config.high_rvol else "UP_ON_LOW_VOLUME" if direction == "UP" and rvol < self.config.low_rvol else "DOWN_ON_HIGH_VOLUME" if direction == "DOWN" and rvol >= self.config.high_rvol else "DOWN_ON_LOW_VOLUME" if direction == "DOWN" and rvol < self.config.low_rvol else "NEUTRAL"
         freshness_as_of = pd.Timestamp(as_of).date() if as_of else None
-        return {"symbol": symbol.upper(), "timeframe": timeframe, "as_of": row.date.date().isoformat(), "latest_volume": float(row.volume), "volume_ma5": float(row.volume_ma5), "volume_ma20": float(row.volume_ma20), "volume_ratio_5": float(row.volume_ratio_5), "volume_ratio_20": float(row.volume_ratio_20), "relative_volume": rvol, "volume_level": level, "volume_trend": trend, "volume_anomaly": anomaly, "price_change_pct": price_change, "volume_change_pct": volume_change, "price_direction": direction, "price_volume_context": context, "data": freshness_snapshot(row.date.date(), len(data), freshness_as_of)}
+        return {"symbol": symbol.upper(), "timeframe": timeframe, "as_of": row.date.date().isoformat(), "latest_volume": float(row.volume), "volume_ma5": float(row.volume_ma5), "volume_ma20": float(row.volume_ma20), "volume_ratio_5": float(row.volume_ratio_5) if np.isfinite(row.volume_ratio_5) else None, "volume_ratio_20": float(row.volume_ratio_20) if np.isfinite(row.volume_ratio_20) else None, "relative_volume": rvol, "volume_level": level, "volume_trend": trend, "volume_anomaly": anomaly, "price_change_pct": price_change, "volume_change_pct": volume_change, "price_direction": direction, "price_volume_context": context, "data": freshness_snapshot(row.date.date(), len(data), freshness_as_of)}
 
     def series(self, bars: pd.DataFrame, as_of: str | None = None) -> list[dict]:
         data = self.calculate(bars, as_of)
-        return [{"date": row.date.date().isoformat(), "volume": float(row.volume), "volume_ma5": float(row.volume_ma5), "volume_ma20": float(row.volume_ma20), "relative_volume": float(row.relative_volume)} for row in data.itertuples(index=False)]
+        return [{"date": row.date.date().isoformat(), "volume": float(row.volume), "volume_ma5": float(row.volume_ma5), "volume_ma20": float(row.volume_ma20), "relative_volume": float(row.relative_volume) if np.isfinite(row.relative_volume) else None} for row in data.itertuples(index=False)]

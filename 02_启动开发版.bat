@@ -8,14 +8,14 @@ if not exist "%PYTHON_EXE%" set "PYTHON_EXE=%ROOT%.venv\Scripts\python.exe"
 powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%scripts\doctor.ps1"
 if errorlevel 1 goto :environment_error
 set "BACKEND_RUNNING=0"
-netstat -ano | findstr /R /C:":8014 .*LISTENING" >nul
+netstat -ano | findstr /R /C:":8015 .*LISTENING" >nul
 if errorlevel 1 goto :start_backend
-powershell -NoProfile -Command "try { $r=Invoke-WebRequest 'http://127.0.0.1:8014/api/news/sources' -UseBasicParsing; if($r.StatusCode -eq 200 -and $r.Content.Contains('PUBLIC_RSS')){exit 0}; exit 1 } catch {exit 1}"
+powershell -NoProfile -Command "try { $r=Invoke-WebRequest 'http://127.0.0.1:8015/api/news/sources' -UseBasicParsing; if($r.StatusCode -eq 200 -and $r.Content.Contains('PUBLIC_RSS')){exit 0}; exit 1} catch {exit 1}"
 if errorlevel 1 goto :stale_backend_error
 set "BACKEND_RUNNING=1"
 :start_backend
 if "%BACKEND_RUNNING%"=="1" goto :start_frontend
-start "DELTA Backend" /D "%ROOT%backend" "%PYTHON_EXE%" -m uvicorn app.main:app --host 127.0.0.1 --port 8014 --reload
+start "DELTA Backend" /D "%ROOT%backend" "%PYTHON_EXE%" -m uvicorn app.main:app --host 127.0.0.1 --port 8015 --reload
 :start_frontend
 netstat -ano | findstr /R /C:":5184 .*LISTENING" >nul
 if not errorlevel 1 goto :open_terminal

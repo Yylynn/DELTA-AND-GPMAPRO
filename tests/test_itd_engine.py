@@ -1,6 +1,6 @@
 import pandas as pd
 
-from app.quant.delta_time import ITDDeltaEngine, ITD_CALENDAR_DAYS, ITD_TRADING_BARS, MIN_GAP_TRADING_DAYS
+from app.quant.delta_time import ITDConfig, ITDDeltaEngine, ITD_CALENDAR_DAYS, ITD_TRADING_BARS, MIN_GAP_TRADING_DAYS
 
 
 def bars(count: int) -> pd.DataFrame:
@@ -25,7 +25,9 @@ def test_skill_delta_uses_fixed_118_bar_units_and_four_colours():
 def test_points_alternate_and_terminal_point_is_not_confirmed():
     result = ITDDeltaEngine().analyze(bars(310))
     confirmed = result["confirmed_points"]
-    assert all(left["type"] != right["type"] for left, right in zip(confirmed, confirmed[1:]))
+    # Base mapping alternates; the effective mapping may intentionally differ
+    # in an ITW once an IBP confirms an inversion.
+    assert all(left["base_type"] != right["base_type"] for left, right in zip(confirmed, confirmed[1:]))
     assert result["boundary_point"]["confirmed"] is False
     assert result["boundary_point"] in result["candidate_points"]
 
@@ -124,3 +126,90 @@ def test_incomplete_history_is_not_structured():
     result = ITDDeltaEngine().analyze(bars(117))
     assert result["status"] == "INSUFFICIENT_HISTORY"
     assert not result["points"]
+
+
+def reversal_fixture(*, m_prime: bool = False, one_prime: bool = False) -> tuple[pd.DataFrame, list[dict]]:
+    dates = pd.date_range("2024-01-01", periods=60, freq="B")
+    frame = pd.DataFrame({"date": dates, "open": [100 + i * .1 for i in range(60)], "high": [101 + i * .1 for i in range(60)], "low": [99 + i * .1 for i in range(60)], "close": [100 + i * .1 for i in range(60)], "volume": 1_000})
+    # Fixed grid points: prior M high, then normally #1 low and #2 high.
+    frame.loc[10, "high"] = 120
+    frame.loc[25, "low"] = 80
+    frame.loc[40, "high"] = 120
+    if m_prime:
+        frame.loc[17, "low"] = 90
+    if one_prime:
+        frame.loc[33, "high"] = 110
+    points = [
+        {"id": "m", "cycle": 1, "number": 12, "bar_index": 10, "type": "HIGH", "price": 120.0, "date": dates[10].date().isoformat(), "confirmed": True},
+        {"id": "one", "cycle": 2, "number": 1, "bar_index": 25, "type": "LOW", "price": 80.0, "date": dates[25].date().isoformat(), "confirmed": True},
+        {"id": "two", "cycle": 2, "number": 2, "bar_index": 40, "type": "HIGH", "price": 120.0, "date": dates[40].date().isoformat(), "confirmed": True},
+    ]
+    return frame, points
+
+
+def test_m_prime_confirms_inversion_and_flips_subsequent_point_roles():
+    frame, points = reversal_fixture(m_prime=True)
+    reversal = ITDDeltaEngine(ITDConfig(reversal_ai_threshold=0))._apply_reversals(frame, points, [value.date() for value in frame.date])
+    assert reversal["state"] == "INVERSION_CONFIRMED"
+    assert [item["label"] for item in reversal["ibps"]] == ["M'"]
+    assert points[1]["type"] == "HIGH"
+    assert points[2]["type"] == "LOW"
+    assert points[1]["reversal_effective_on"] == reversal["ibps"][0]["confirmed_on"]
+
+
+def test_one_prime_confirms_inversion_only_after_point_one():
+    frame, points = reversal_fixture(one_prime=True)
+    reversal = ITDDeltaEngine(ITDConfig(reversal_ai_threshold=0))._apply_reversals(frame, points, [value.date() for value in frame.date])
+    assert [item["label"] for item in reversal["ibps"]] == ["1'"]
+    assert points[1]["type"] == "LOW"
+    assert points[2]["type"] == "LOW"
+    assert reversal["ibps"][0]["confirmed_on"] > reversal["ibps"][0]["date"]
+
+
+def test_double_inversion_restores_the_original_mapping():
+    frame, points = reversal_fixture(m_prime=True, one_prime=True)
+    reversal = ITDDeltaEngine(ITDConfig(reversal_ai_threshold=0))._apply_reversals(frame, points, [value.date() for value in frame.date])
+    assert reversal["state"] == "DOUBLE_INVERSION_CONFIRMED"
+    assert [item["label"] for item in reversal["ibps"]] == ["M'", "1'"]
+    assert points[1]["type"] == "HIGH"
+    assert points[2]["type"] == "HIGH"
+
+
+def test_sub_atr_swing_is_not_an_ibp():
+    frame, points = reversal_fixture(m_prime=True)
+    # Artificially enlarge the local true range: the 30-point candidate move
+    # no longer reaches one ATR and must remain ordinary noise.
+    frame.loc[:, "high"] = 140
+    frame.loc[:, "low"] = 60
+    frame.loc[10, "high"] = 120
+    frame.loc[17, "low"] = 90
+    engine = ITDDeltaEngine(ITDConfig(reversal_min_excursion_atr=1.0))
+    reversal = engine._apply_reversals(frame, points, [value.date() for value in frame.date])
+    assert not reversal["ibps"]
+    assert points[1]["type"] == "LOW"
+
+
+def test_low_ai_probability_keeps_original_mapping_even_with_a_structural_candidate():
+    frame, points = reversal_fixture(m_prime=True)
+    reversal = ITDDeltaEngine(ITDConfig(reversal_ai_threshold=.95))._apply_reversals(frame, points, [value.date() for value in frame.date])
+    assert reversal["candidates"]
+    assert not reversal["ibps"]
+    assert points[1]["type"] == "LOW"
+    assert points[2]["type"] == "HIGH"
+
+
+def test_no_ibp_keeps_normal_mapping_and_does_not_publish_an_itw_event():
+    frame, points = reversal_fixture()
+    reversal = ITDDeltaEngine()._apply_reversals(frame, points, [value.date() for value in frame.date])
+    assert reversal["state"] == "NORMAL"
+    assert not reversal["windows"]
+    assert not reversal["ibps"]
+    assert points[1]["type"] == "LOW"
+
+
+def test_ai_disabled_always_falls_back_to_normal_mapping():
+    frame, points = reversal_fixture(m_prime=True)
+    reversal = ITDDeltaEngine(ITDConfig(reversal_ai_enabled=False, reversal_ai_threshold=0))._apply_reversals(frame, points, [value.date() for value in frame.date])
+    assert reversal["ai"]["available"] is False
+    assert not reversal["ibps"]
+    assert points[1]["type"] == "LOW"

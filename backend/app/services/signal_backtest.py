@@ -6,15 +6,15 @@ signal is evaluated independently at the close where it becomes knowable.
 from __future__ import annotations
 
 import statistics
-import hashlib
-import json
 from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
 
 from app.quant.delta_time import ITDDeltaEngine
+from app.services.gpmaapro_engine import GpmaAproEngine
 from app.services.gpmapro_engine import GpmaProEngine
+from app.services.research_metadata import research_run_metadata
 
 
 @dataclass(frozen=True)
@@ -24,11 +24,13 @@ class SignalBacktestConfig:
     delta_confirmation_window: int = 5
     random_seed: int = 20260813
     bootstrap_samples: int = 1_000
+    minimum_trades: int = 30
+    out_of_sample_fraction: float = 0.25
 
 
 class SignalBacktestService:
     def __init__(self, config: SignalBacktestConfig = SignalBacktestConfig()):
-        self.config, self.gpma = config, GpmaProEngine()
+        self.config, self.gpma, self.gpma2 = config, GpmaProEngine(), GpmaAproEngine()
 
     def _delta_flags(self, data: pd.DataFrame) -> tuple[pd.Series, pd.Series, dict[int, dict]]:
         low = pd.Series(False, index=data.index); high = pd.Series(False, index=data.index)
@@ -50,23 +52,33 @@ class SignalBacktestService:
 
     def _signals(self, bars: pd.DataFrame) -> pd.DataFrame:
         data = self.gpma.calculate(bars).copy().reset_index(drop=True)
+        gpma2 = self.gpma2.calculate(bars).copy().reset_index(drop=True)
         delta_low, delta_high, delta_context = self._delta_flags(data)
         window = self.config.delta_confirmation_window
         low_window = delta_low.rolling(window, min_periods=1).max().astype(bool)
         high_window = delta_high.rolling(window, min_periods=1).max().astype(bool)
+        gpma1_b = data[["b1", "b2", "b3"]].any(axis=1)
+        gpma1_s = data[["s1", "s2"]].any(axis=1)
+        gpma2_b = gpma2[["b01", "b02", "b03", "b11", "b12", "b3", "b4"]].any(axis=1)
+        gpma2_s = gpma2[["s01", "s02", "s11", "s12", "s2", "s22"]].any(axis=1)
         result = pd.DataFrame({
             "DELTA_LOW": delta_low, "DELTA_HIGH": delta_high,
-            "GPMAPRO_B": data[["b1", "b2", "b3"]].any(axis=1),
-            "GPMAPRO_S": data[["s1", "s2"]].any(axis=1),
-            "DELTA_LOW_X_B": low_window & data[["b1", "b2", "b3"]].any(axis=1),
-            "DELTA_HIGH_X_S": high_window & data[["s1", "s2"]].any(axis=1),
+            # Existing identifiers remain the stable 1.0 contract.
+            "GPMAPRO_B": gpma1_b,
+            "GPMAPRO_S": gpma1_s,
+            "DELTA_LOW_X_B": low_window & gpma1_b,
+            "DELTA_HIGH_X_S": high_window & gpma1_s,
+            "GPMA2_B": gpma2_b,
+            "GPMA2_S": gpma2_s,
+            "DELTA_LOW_X_GPMA2_B": low_window & gpma2_b,
+            "DELTA_HIGH_X_GPMA2_S": high_window & gpma2_s,
         })
         result.attrs["delta_context"] = delta_context
         return result
 
     @staticmethod
     def _side(name: str) -> int:
-        return -1 if name in {"DELTA_HIGH", "GPMAPRO_S", "DELTA_HIGH_X_S"} else 1
+        return -1 if name in {"DELTA_HIGH", "GPMAPRO_S", "DELTA_HIGH_X_S", "GPMA2_S", "DELTA_HIGH_X_GPMA2_S"} else 1
 
     def _trade(self, data: pd.DataFrame, index: int, signal: str, horizon: int, cost_bps: float, delta_context: dict | None = None) -> dict | None:
         if index + horizon + 1 >= len(data):
@@ -102,10 +114,65 @@ class SignalBacktestService:
         result["net_return_ci_95"] = [statistics.mean(item[0] for item in ci), statistics.mean(item[1] for item in ci)] if ci else [None, None]
         return result
 
+    def _candidate(self, version: str, signal: str, horizon: str, stats: dict, baseline: dict) -> dict:
+        average = stats.get("average_net_return")
+        random_average = baseline.get("average_net_return")
+        edge = average - random_average if average is not None and random_average is not None else None
+        count = int(stats.get("sample_count", 0))
+        ci_low = (stats.get("net_return_ci_95") or [None, None])[0]
+        if count < self.config.minimum_trades:
+            verdict = "INSUFFICIENT_SAMPLE"
+        elif edge is None or edge <= 0 or average is None or average <= 0:
+            verdict = "NO_EDGE"
+        elif ci_low is not None and ci_low > 0:
+            verdict = "OOS_CANDIDATE"
+        else:
+            verdict = "WATCH"
+        return {"version": version, "signal": signal, "horizon": int(horizon), "sample_count": count, "average_net_return": average, "random_baseline_return": random_average, "edge_vs_random": edge, "net_return_ci_95": stats.get("net_return_ci_95", [None, None]), "verdict": verdict}
+
+    def _version_comparison(self, pooled: dict, baselines: dict, horizons: list[str]) -> dict:
+        definitions = {
+            "indicator_only": {
+                "BUY": {"1.0": "GPMAPRO_B", "2.0": "GPMA2_B"},
+                "SELL": {"1.0": "GPMAPRO_S", "2.0": "GPMA2_S"},
+            },
+            "delta_confirmed": {
+                "BUY": {"1.0": "DELTA_LOW_X_B", "2.0": "DELTA_LOW_X_GPMA2_B"},
+                "SELL": {"1.0": "DELTA_HIGH_X_S", "2.0": "DELTA_HIGH_X_GPMA2_S"},
+            },
+        }
+        setups: dict[str, dict] = {}
+        all_candidates: list[dict] = []
+        for setup, actions in definitions.items():
+            setups[setup] = {}
+            for action, versions in actions.items():
+                candidates = [
+                    self._candidate(version, signal, horizon, pooled[signal][horizon], baselines[signal][horizon])
+                    for version, signal in versions.items() for horizon in horizons
+                ]
+                eligible = [item for item in candidates if item["verdict"] != "INSUFFICIENT_SAMPLE"]
+                winner = max(eligible, key=lambda item: (item["edge_vs_random"] if item["edge_vs_random"] is not None else -float("inf"), item["average_net_return"] if item["average_net_return"] is not None else -float("inf"))) if eligible else None
+                setups[setup][action] = {"candidates": candidates, "winner": winner, "status": winner["verdict"] if winner else "INSUFFICIENT_SAMPLE"}
+                all_candidates.extend({**item, "setup": setup, "action": action} for item in candidates)
+        def best(action: str) -> dict | None:
+            candidates = [item for item in all_candidates if item["action"] == action and item["verdict"] in {"OOS_CANDIDATE", "WATCH"}]
+            return max(candidates, key=lambda item: (item["verdict"] == "OOS_CANDIDATE", item["edge_vs_random"] or -float("inf"))) if candidates else None
+        return {
+            "minimum_trades": self.config.minimum_trades,
+            "execution": "signal-day close is observed; trade at next-session open",
+            "sell_semantics": "SELL measures decline avoided after a bearish signal; it is not a short-selling order",
+            "setups": setups,
+            "best_buy": best("BUY"),
+            "best_sell": best("SELL"),
+        }
+
     def run_symbol(self, bars: pd.DataFrame, symbol: str, *, horizons: tuple[int, ...] | None = None, cost_bps: float | None = None, start_date: str | None = None, end_date: str | None = None) -> dict:
         data = bars.copy().sort_values("date").reset_index(drop=True); data["date"] = pd.to_datetime(data.date)
         flags = self._signals(data); delta_context = flags.attrs.get("delta_context", {}); horizons, cost = horizons or self.config.horizons, self.config.default_cost_bps if cost_bps is None else cost_bps
         lower, upper = pd.Timestamp(start_date) if start_date else data.date.iloc[0], pd.Timestamp(end_date) if end_date else data.date.iloc[-1]
+        eligible_dates = data.loc[(data.date >= lower) & (data.date <= upper), "date"].reset_index(drop=True)
+        split_index = min(len(eligible_dates) - 1, max(0, int(len(eligible_dates) * (1 - self.config.out_of_sample_fraction))))
+        out_of_sample_start = eligible_dates.iloc[split_index] if len(eligible_dates) else upper
         groups: dict[str, dict[str, dict]] = {}; all_trades: list[dict] = []
         for signal in flags:
             groups[signal] = {}
@@ -131,19 +198,37 @@ class SignalBacktestService:
                 picked = rng.choice(candidates, size=min(count, len(candidates)), replace=False).tolist() if count and candidates else []
                 trades = [self._trade(data, int(i), signal, horizon, cost) for i in picked]
                 completed = [x for x in trades if x]; baselines[signal][str(horizon)] = self._stats(completed); baseline_trades.extend(completed)
-        return {"symbol": symbol.upper(), "period": {"start": lower.date().isoformat(), "end": upper.date().isoformat()}, "cost_bps_per_side": cost, "delta_confirmation_window_bars": self.config.delta_confirmation_window, "groups": groups, "random_baselines": baselines, "trades": all_trades, "baseline_trades": baseline_trades}
+        oos_groups, oos_baselines = {}, {}
+        for signal in groups:
+            oos_groups[signal], oos_baselines[signal] = {}, {}
+            for horizon in horizons:
+                signal_trades = [trade for trade in all_trades if trade["signal"] == signal and trade["horizon"] == horizon and pd.Timestamp(trade["date"]) >= out_of_sample_start]
+                oos_groups[signal][str(horizon)] = self._stats(signal_trades)
+                candidates = [i for i in valid_indexes if data.date.iloc[i] >= out_of_sample_start and i + horizon < len(data)]
+                picked = rng.choice(candidates, size=min(len(signal_trades), len(candidates)), replace=False).tolist() if signal_trades and candidates else []
+                random_trades = [trade for i in picked if (trade := self._trade(data, int(i), signal, horizon, cost))]
+                oos_baselines[signal][str(horizon)] = self._stats(random_trades)
+        return {"symbol": symbol.upper(), "period": {"start": lower.date().isoformat(), "end": upper.date().isoformat()}, "validation_split": {"method": "chronological_holdout", "out_of_sample_fraction": self.config.out_of_sample_fraction, "out_of_sample_start": out_of_sample_start.date().isoformat()}, "cost_bps_per_side": cost, "delta_confirmation_window_bars": self.config.delta_confirmation_window, "groups": groups, "random_baselines": baselines, "out_of_sample_groups": oos_groups, "out_of_sample_random_baselines": oos_baselines, "trades": all_trades, "baseline_trades": baseline_trades}
 
     def run(self, bars_by_symbol: dict[str, pd.DataFrame], **kwargs) -> dict:
         run_args = {key: value for key, value in kwargs.items() if key != "data_provenance"}
         results = {symbol.upper(): self.run_symbol(bars, symbol, **run_args) for symbol, bars in bars_by_symbol.items()}
         signals = sorted({signal for result in results.values() for signal in result["groups"]}); horizons = sorted({horizon for result in results.values() for values in result["groups"].values() for horizon in values}, key=int)
-        pooled, pooled_baseline = {}, {}
+        pooled, pooled_baseline, pooled_oos, pooled_oos_baseline = {}, {}, {}, {}
         for signal in signals:
-            pooled[signal], pooled_baseline[signal] = {}, {}
+            pooled[signal], pooled_baseline[signal], pooled_oos[signal], pooled_oos_baseline[signal] = {}, {}, {}, {}
             for horizon in horizons:
                 per_symbol = [result["groups"][signal][horizon] for result in results.values()]
                 random_per_symbol = [result["random_baselines"][signal][horizon] for result in results.values()]
                 pooled[signal][horizon], pooled_baseline[signal][horizon] = self._equal_weight_stats(per_symbol), self._equal_weight_stats(random_per_symbol)
-        metadata = {"symbols": sorted(results), "periods": {symbol: result["period"] for symbol, result in results.items()}, "cost_bps_per_side": kwargs.get("cost_bps", self.config.default_cost_bps), "horizons": horizons, "signal_groups": signals, "formula": "JUSTIN_WEAPON", "formula_sha256": "3a11a5f2252df502f20c95c231b07090d2fcf06a42b2986d83106ce535d2b664", "random_seed": self.config.random_seed, "data_provenance": kwargs.get("data_provenance", {"source": "local_csv"})}
-        fingerprint = hashlib.sha256(json.dumps(metadata, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-        return {"symbols": results, "pooled": {"groups": pooled, "random_baselines": pooled_baseline}, "run_metadata": {**metadata, "fingerprint": fingerprint}, "assumptions": {"signal": "confirmation-day close", "entry": "next-session open", "exit": "fixed-horizon session open", "cost": "round trip: two x per-side bps", "short_return": "direction-adjusted underlying return", "overlap": "same signal bucket does not open overlapping positions", "aggregation": "equal weight across symbols; within-symbol event study", "causality": "DELTA activates only after confirmation; GPMAPRO uses only current and prior OHLCV"}}
+                oos_per_symbol = [result["out_of_sample_groups"][signal][horizon] for result in results.values()]
+                oos_random_per_symbol = [result["out_of_sample_random_baselines"][signal][horizon] for result in results.values()]
+                pooled_oos[signal][horizon], pooled_oos_baseline[signal][horizon] = self._equal_weight_stats(oos_per_symbol), self._equal_weight_stats(oos_random_per_symbol)
+        comparison = self._version_comparison(pooled_oos, pooled_oos_baseline, horizons)
+        comparison["validation"] = "chronological final-25% holdout; full-sample results are descriptive only"
+        provenance = kwargs.get("data_provenance", {"source": "local_csv"})
+        parameters = {"symbols": sorted(results), "periods": {symbol: result["period"] for symbol, result in results.items()}, "cost_bps_per_side": kwargs.get("cost_bps", self.config.default_cost_bps), "horizons": horizons, "signal_groups": signals, "random_seed": self.config.random_seed}
+        stable_context = {"formula": "JUSTIN_WEAPON", "formula_sha256": "3a11a5f2252df502f20c95c231b07090d2fcf06a42b2986d83106ce535d2b664"}
+        audit = research_run_metadata(parameters=parameters, data_provenance=provenance, stable_context=stable_context)
+        metadata = {**parameters, **stable_context, "data_provenance": provenance, **audit}
+        return {"symbols": results, "pooled": {"groups": pooled, "random_baselines": pooled_baseline, "out_of_sample_groups": pooled_oos, "out_of_sample_random_baselines": pooled_oos_baseline}, "version_comparison": comparison, "run_metadata": metadata, "assumptions": {"signal": "confirmation-day close", "entry": "next-session open", "exit": "fixed-horizon session open", "cost": "round trip: two x per-side bps", "short_return": "direction-adjusted underlying return", "overlap": "same signal bucket does not open overlapping positions", "aggregation": "equal weight across symbols; within-symbol event study", "validation": "version winner uses only the chronological final-25% holdout", "causality": "DELTA activates only after confirmation; GPMAPRO 1.0 and 2.0 use only current and prior OHLCV"}}

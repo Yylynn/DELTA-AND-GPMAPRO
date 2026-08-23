@@ -6,8 +6,6 @@ signals are generated at the close and always execute at the following open.
 """
 from __future__ import annotations
 
-import hashlib
-import json
 import statistics
 from dataclasses import dataclass
 from datetime import date
@@ -17,6 +15,7 @@ import pandas as pd
 
 from app.quant.delta_time import ITDDeltaEngine
 from app.services.gpmapro_engine import GpmaProEngine
+from app.services.research_metadata import research_run_metadata
 
 
 ENTRY_RULES = {
@@ -301,8 +300,15 @@ class StrategyLabService:
                 b_trades = [trade for trades in all_trades.values() for trade in trades if trade["entry_rule"] == "B_ONLY" and trade["exit_rule"] == exit_]
                 b_metrics = self._metrics(b_trades, seed_offset=20_000 + len(strategies))
                 strategies.append({"id": key, "entry_rule": entry, "entry_label": entry_label, "exit_rule": exit_, "exit_label": exit_label, "metrics": metrics, "random_baseline": random_metrics, "b_only_baseline": b_metrics, "per_symbol": per_symbol, "net_edge_vs_random": None if metrics["average_net_return"] is None or random_metrics["average_net_return"] is None else metrics["average_net_return"] - random_metrics["average_net_return"], "trades": actual[:200]})
-        metadata = {"formula": FORMULA_VERSION, "execution": "signal-day close; next-trading-day open", "cost_bps_per_side": self.config.cost_bps_per_side, "confirmation_bars": self.config.confirmation_bars, "max_hold_bars": self.config.max_hold_bars, "entry_rules": ENTRY_RULES, "exit_rules": EXIT_RULES, "data_provenance": data_provenance or {"source": "local_csv"}}
-        fingerprint = hashlib.sha256(json.dumps(metadata, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+        provenance = data_provenance or {"source": "local_csv"}
+        periods = {}
+        for symbol, bars in bars_by_symbol.items():
+            dates = pd.to_datetime(bars.date)
+            periods[symbol.upper()] = {"start": dates.min().date().isoformat(), "end": dates.max().date().isoformat(), "bar_count": len(bars)}
+        parameters = {"symbols": sorted(features), "periods": periods, "cost_bps_per_side": self.config.cost_bps_per_side, "confirmation_bars": self.config.confirmation_bars, "max_hold_bars": self.config.max_hold_bars, "entry_rules": ENTRY_RULES, "exit_rules": EXIT_RULES}
+        stable_context = {"formula": FORMULA_VERSION, "execution": "signal-day close; next-trading-day open"}
+        audit = research_run_metadata(parameters=parameters, data_provenance=provenance, stable_context=stable_context)
+        metadata = {**stable_context, **parameters, "data_provenance": provenance, **audit}
         walk_forward = self._walk_forward(features, all_trades)
         for strategy in strategies:
             walk = walk_forward[strategy["id"]]["summary"]
@@ -322,4 +328,4 @@ class StrategyLabService:
             strategy["research_assessment"] = {"label": "WORTH_CONTINUING" if not failed else ("NOT_ROBUST" if walk["active_window_count"] >= 4 else "INSUFFICIENT_EVIDENCE"), "checks": checks, "failed_checks": failed, "active_symbols": active_symbols, "dominant_etf_share": dominant_share}
         if progress:
             progress({"stage": "complete", "symbol": None, "completed_symbols": total_symbols, "total_symbols": total_symbols, "symbol_progress": 1.0, "progress": 1.0})
-        return {"run_metadata": {**metadata, "fingerprint": fingerprint}, "delta_audit": audits, "strategies": strategies, "walk_forward": walk_forward, "assumptions": {"scope": "long-only research", "delta": "only forecasts published before the signal-day close activate a DELTA window", "divergence": "smile/arrow markers are confirmation conditions, not standalone orders", "execution": "all entries and exits execute at the following session open", "warning": "results are historical research evidence; current universes may have survivorship bias"}}
+        return {"run_metadata": metadata, "delta_audit": audits, "strategies": strategies, "walk_forward": walk_forward, "assumptions": {"scope": "long-only research", "delta": "only forecasts published before the signal-day close activate a DELTA window", "divergence": "smile/arrow markers are confirmation conditions, not standalone orders", "execution": "all entries and exits execute at the following session open", "warning": "results are historical research evidence; current universes may have survivorship bias"}}

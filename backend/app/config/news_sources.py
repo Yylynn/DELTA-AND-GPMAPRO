@@ -24,20 +24,11 @@ class NewsSource:
 # RSS entries retain titles, links and dates only. No article body is fetched.
 SOURCES = (
     NewsSource("cnbc", "CNBC", ("US", "GLOBAL"), "财经媒体", 0, "PUBLIC_RSS", True, False, ("cnbc",), "RSS", "MARKET", "https://www.cnbc.com/id/10001147/device/rss/rss.html"),
-    NewsSource("reuters", "Reuters", ("US", "GLOBAL"), "通讯社", 0, "LICENSE_REQUIRED", aliases=("reuters", "路透")),
-    NewsSource("bloomberg", "Bloomberg", ("US", "GLOBAL"), "财经媒体", 0, "LICENSE_REQUIRED", aliases=("bloomberg", "彭博")),
-    NewsSource("eastmoney", "东方财富", ("CN",), "财经门户", 1, "PUBLIC_RSS_OR_API", aliases=("东方财富", "eastmoney")),
-    NewsSource("wallstreetcn", "华尔街见闻", ("CN", "GLOBAL"), "宏观资讯", 1, "PUBLIC_RSS_OR_API", aliases=("华尔街见闻", "wallstreetcn")),
+    NewsSource("wallstreetcn", "华尔街见闻", ("CN", "GLOBAL"), "宏观资讯", 1, "PUBLIC_RSS", True, False, ("华尔街见闻", "wallstreetcn"), "RSS", "MARKET", "https://dedicated.wallstreetcn.com/rss.xml"),
     NewsSource("marketwatch", "MarketWatch", ("US",), "财经媒体", 1, "PUBLIC_RSS", True, False, ("marketwatch",), "RSS", "MARKET", "https://feeds.content.dowjones.io/public/rss/mw_topstories"),
-    NewsSource("simuwang", "私募排排网", ("CN",), "基金数据", 2, "LICENSE_REQUIRED", aliases=("私募排排网",)),
-    NewsSource("stcn", "证券时报", ("CN",), "证券媒体", 1, "PUBLIC_RSS_OR_API", aliases=("证券时报", "stcn")),
-    NewsSource("10jqka", "同花顺财经", ("CN",), "财经门户", 1, "PUBLIC_RSS_OR_API", aliases=("同花顺", "10jqka")),
-    NewsSource("xueqiu", "雪球", ("CN", "US"), "投资者社区", 2, "PUBLIC_RSS_OR_API", aliases=("雪球", "xueqiu")),
-    NewsSource("thestreet", "TheStreet", ("US",), "美股分析", 1, "OPENBB_PUBLIC", True, False, ("thestreet", "the street"), "OPENBB", "COMPANY"),
-    NewsSource("barclayhedge", "BarclayHedge/对冲数据", ("GLOBAL",), "对冲基金数据", 2, "LICENSE_REQUIRED", aliases=("barclayhedge", "巴克莱对冲")),
-    NewsSource("bridgewater", "桥水观察", ("GLOBAL",), "策略观察", 2, "LICENSE_REQUIRED", aliases=("桥水", "bridgewater")),
-    NewsSource("morningstar", "晨星", ("US", "GLOBAL"), "基金评级", 1, "LICENSE_REQUIRED", aliases=("morningstar", "晨星")),
-    NewsSource("jiemian", "界面新闻", ("CN",), "财经商业新闻", 1, "PUBLIC_RSS_OR_API", aliases=("界面新闻", "jiemian")),
+    NewsSource("openbb_yfinance", "OpenBB/yfinance", ("US", "GLOBAL"), "新闻聚合", 1, "AGGREGATED_PUBLIC", True, False, ("openbb", "yfinance"), "OPENBB", "COMPANY"),
+    NewsSource("sec_edgar", "SEC EDGAR", ("US",), "监管申报", 0, "PUBLIC_API", True, True, ("sec", "sec edgar"), "SEC", "COMPANY", refresh_minutes=30),
+    NewsSource("finnhub_company", "Finnhub Company News", ("US",), "公司新闻", 1, "PUBLIC_API_KEY", True, True, ("finnhub", "finnhub company news"), "FINNHUB", "COMPANY"),
 )
 
 

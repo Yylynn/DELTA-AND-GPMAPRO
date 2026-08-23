@@ -48,6 +48,8 @@ def test_multi_symbol_summary_is_equal_weighted_and_fingerprinted():
     assert candidate["aggregation"] == "EQUAL_WEIGHT_BY_SYMBOL"
     assert result["run_metadata"]["fingerprint"]
     assert len(candidate["net_return_ci_95"]) == 2
+    assert result["version_comparison"]["validation"].startswith("chronological final-25%")
+    assert result["symbols"]["AAA"]["validation_split"]["out_of_sample_start"]
 
 
 def test_run_metadata_binds_formula_and_immutable_data_provenance():
@@ -56,6 +58,48 @@ def test_run_metadata_binds_formula_and_immutable_data_provenance():
     assert result["run_metadata"]["formula"] == "JUSTIN_WEAPON"
     assert result["run_metadata"]["formula_sha256"]
     assert result["run_metadata"]["data_provenance"] == provenance
+
+
+def test_signal_backtest_compares_gpma_versions_and_delta_confirmations(monkeypatch):
+    service = SignalBacktestService()
+    source = bars(40)
+
+    def gpma1(frame):
+        result = frame.copy()
+        for column in ("b1", "b2", "b3", "s1", "s2"):
+            result[column] = False
+        result.loc[10, "b1"] = True
+        result.loc[20, "s1"] = True
+        return result
+
+    def gpma2(frame):
+        result = frame.copy()
+        for column in ("b01", "b02", "b03", "b11", "b12", "b3", "b4", "s01", "s02", "s11", "s12", "s2", "s22"):
+            result[column] = False
+        result.loc[11, "b11"] = True
+        result.loc[21, "s11"] = True
+        return result
+
+    delta_low = pd.Series(False, index=source.index); delta_low.loc[9] = True
+    delta_high = pd.Series(False, index=source.index); delta_high.loc[19] = True
+    monkeypatch.setattr(service.gpma, "calculate", gpma1)
+    monkeypatch.setattr(service.gpma2, "calculate", gpma2)
+    monkeypatch.setattr(service, "_delta_flags", lambda data: (delta_low, delta_high, {}))
+    flags = service._signals(source)
+    assert flags.loc[11, "DELTA_LOW_X_GPMA2_B"]
+    assert flags.loc[21, "DELTA_HIGH_X_GPMA2_S"]
+    assert service._side("GPMA2_S") == -1
+
+
+def test_version_comparison_requires_30_trades_before_declaring_a_winner():
+    service = SignalBacktestService()
+    signals = ("GPMAPRO_B", "GPMAPRO_S", "DELTA_LOW_X_B", "DELTA_HIGH_X_S", "GPMA2_B", "GPMA2_S", "DELTA_LOW_X_GPMA2_B", "DELTA_HIGH_X_GPMA2_S")
+    stats = {signal: {"10": {"sample_count": 29, "average_net_return": .03, "net_return_ci_95": [.01, .05]}} for signal in signals}
+    baselines = {signal: {"10": {"average_net_return": 0.0}} for signal in signals}
+    result = service._version_comparison(stats, baselines, ["10"])
+    assert result["best_buy"] is None
+    assert result["best_sell"] is None
+    assert result["setups"]["delta_confirmed"]["BUY"]["status"] == "INSUFFICIENT_SAMPLE"
 
 
 def test_portfolio_replay_is_cash_constrained_and_reports_risk_metrics():

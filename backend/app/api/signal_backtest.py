@@ -1,5 +1,6 @@
 import csv
 import io
+import json
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
@@ -7,6 +8,7 @@ from pydantic import BaseModel, Field
 
 from app.api.data import bars_for_source, bars_for_timeframe
 from app.services.signal_backtest import SignalBacktestService
+from app.services.research_metadata import local_csv_provenance, provenance_sha256
 
 router = APIRouter(tags=["signal-backtest"])
 
@@ -27,7 +29,8 @@ def _bars_and_provenance(request: SignalBacktestRequest):
             raise ValueError("a Futu snapshot backtest accepts exactly one matching symbol")
         bars, snapshot = bars_for_source(symbols[0], request.timeframe, request.snapshot_id)
         return {symbols[0]: bars}, {"source": "futu_opend_snapshot", "snapshot_id": request.snapshot_id, "code": snapshot["code"], "timeframe": snapshot["timeframe"], "autype": snapshot.get("autype"), "data_sha256": snapshot.get("data_sha256")}
-    return ({symbol: bars_for_timeframe(symbol, request.timeframe)[0] for symbol in symbols}, {"source": "local_csv", "timeframe": request.timeframe})
+    frames = {symbol: bars_for_timeframe(symbol, request.timeframe)[0] for symbol in symbols}
+    return frames, local_csv_provenance(frames, request.timeframe)
 
 @router.post("/backtest/signals")
 def signal_backtest(request: SignalBacktestRequest):
@@ -46,13 +49,16 @@ def signal_backtest(request: SignalBacktestRequest):
 def signal_backtest_export(request: SignalBacktestRequest):
     result = signal_backtest(request)
     output = io.StringIO(); writer = csv.writer(output)
-    writer.writerow(["kind", "symbol", "signal", "horizon", "date", "exit_date", "side", "gross_return", "net_return", "mfe", "mae", "sample_count", "aggregation", "run_fingerprint", "snapshot_id", "data_sha256"])
+    writer.writerow(["kind", "symbol", "signal", "horizon", "date", "exit_date", "side", "gross_return", "net_return", "mfe", "mae", "sample_count", "aggregation", "run_fingerprint", "git_commit", "generated_at", "snapshot_id", "data_sha256", "data_provenance"])
     fingerprint = result["run_metadata"]["fingerprint"]
+    git_commit = result["run_metadata"]["git_commit"]
+    generated_at = result["run_metadata"]["generated_at"]
     provenance = result["run_metadata"].get("data_provenance", {})
+    provenance_json = json.dumps(provenance, ensure_ascii=False, sort_keys=True)
     for symbol, values in result["symbols"].items():
         for trade in values["trades"]:
-            writer.writerow(["trade", symbol, trade["signal"], trade["horizon"], trade["date"], trade["exit_date"], trade["side"], trade["gross_return"], trade["net_return"], trade["mfe"], trade["mae"], "", "", fingerprint, provenance.get("snapshot_id", ""), provenance.get("data_sha256", "")])
+            writer.writerow(["trade", symbol, trade["signal"], trade["horizon"], trade["date"], trade["exit_date"], trade["side"], trade["gross_return"], trade["net_return"], trade["mfe"], trade["mae"], "", "", fingerprint, git_commit, generated_at, provenance.get("snapshot_id", ""), provenance_sha256(provenance, symbol) or "", provenance_json])
     for signal, horizons in result["pooled"]["groups"].items():
         for horizon, stats in horizons.items():
-            writer.writerow(["summary", "ALL", signal, horizon, "", "", "", "", stats["average_net_return"], stats["average_mfe"], stats["average_mae"], stats["sample_count"], stats.get("aggregation", ""), fingerprint, provenance.get("snapshot_id", ""), provenance.get("data_sha256", "")])
+            writer.writerow(["summary", "ALL", signal, horizon, "", "", "", "", stats["average_net_return"], stats["average_mfe"], stats["average_mae"], stats["sample_count"], stats.get("aggregation", ""), fingerprint, git_commit, generated_at, provenance.get("snapshot_id", ""), provenance_sha256(provenance) or "", provenance_json])
     return StreamingResponse(iter([output.getvalue()]), media_type="text/csv", headers={"Content-Disposition": "attachment; filename=signal-backtest.csv"})

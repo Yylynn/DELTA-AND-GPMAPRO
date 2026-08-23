@@ -7,5 +7,5 @@ const rootDirectory = path.dirname(fileURLToPath(import.meta.url));
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   resolve: { alias: { "@": path.resolve(rootDirectory, "./src") } },
-  server: { port: 5184, strictPort: true, proxy: { "/api": "http://127.0.0.1:8014" } },
+  server: { port: 5184, strictPort: true, proxy: { "/api": "http://127.0.0.1:8015" } },
 });

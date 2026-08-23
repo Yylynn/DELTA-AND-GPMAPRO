@@ -4,6 +4,9 @@ from app.api.system import router as system_router
 from app.api.data import router as data_router
 from app.api.delta import router as delta_router
 from app.api.gpmapro import router as gpmapro_router
+from app.api.gpmaapro import router as gpmaapro_router
+from app.api.gpma2 import router as gpma2_router
+from app.api.interpretation import router as interpretation_router
 from app.api.volume import router as volume_router
 from app.api.itd import router as itd_router
 from app.api.event_backtest import router as event_backtest_router
@@ -26,6 +29,9 @@ app.include_router(system_router, prefix="/api")
 app.include_router(data_router, prefix="/api")
 app.include_router(delta_router, prefix="/api")
 app.include_router(gpmapro_router, prefix="/api")
+app.include_router(gpmaapro_router, prefix="/api")
+app.include_router(gpma2_router, prefix="/api")
+app.include_router(interpretation_router, prefix="/api")
 app.include_router(volume_router, prefix="/api")
 app.include_router(itd_router, prefix="/api")
 app.include_router(event_backtest_router, prefix="/api")

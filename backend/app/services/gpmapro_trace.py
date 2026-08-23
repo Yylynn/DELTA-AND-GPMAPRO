@@ -12,8 +12,9 @@ import pandas as pd
 
 
 class TraceSnapshotService:
-    def __init__(self, root: Path | None = None):
+    def __init__(self, root: Path | None = None, namespace: str = "GPMAPRO"):
         self.root = root or Path(__file__).resolve().parents[3] / "data" / "gpmapro_trace"
+        self.namespace = namespace
         self.root.mkdir(parents=True, exist_ok=True)
 
     def list(self) -> list[dict]:
@@ -35,7 +36,7 @@ class TraceSnapshotService:
             raise ValueError("TRACE CSV contains no valid dates")
         content_hash = hashlib.sha256(clean.to_csv(index=False).encode("utf-8")).hexdigest()
         created_at = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
-        trace_id = f"GPMAPRO_TRACE_{created_at}_{content_hash[:10]}"
+        trace_id = f"{self.namespace}_TRACE_{created_at}_{content_hash[:10]}"
         manifest = {
             "trace_id": trace_id, "reference": reference, "created_at": created_at,
             "content_sha256": content_hash, "rows": len(clean),

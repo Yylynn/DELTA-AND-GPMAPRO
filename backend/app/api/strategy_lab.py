@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 from app.api.data import bars_for_source, bars_for_timeframe
 from app.services.strategy_lab import FORMULA_VERSION, StrategyLabConfig, StrategyLabService
 from app.services.strategy_lab_runs import StrategyLabRunStore
+from app.services.research_metadata import local_csv_provenance
 
 router = APIRouter(tags=["strategy-lab"])
 run_store = StrategyLabRunStore(Path(__file__).resolve().parents[3] / "data" / "strategy_lab_runs")
@@ -46,14 +47,17 @@ def _prepare(request: StrategyLabRequest):
         provenance = {"source": "futu_opend_snapshot", "snapshot_id": request.snapshot_id, "code": snapshot["code"], "timeframe": snapshot["timeframe"], "autype": snapshot.get("autype"), "data_sha256": snapshot.get("data_sha256")}
     else:
         payload = {symbol: bars_for_timeframe(symbol, request.timeframe)[0] for symbol in symbols}
-        manifests = {symbol: {"source": "local_csv"} for symbol in symbols}
-        provenance = {"source": "local_csv", "timeframe": request.timeframe}
+        provenance = local_csv_provenance(payload, request.timeframe)
+        manifests = provenance["datasets"]
     for symbol, bars in payload.items():
         if request.start_date:
             bars = bars[bars.date >= request.start_date]
         if request.end_date:
             bars = bars[bars.date <= request.end_date]
         payload[symbol] = bars
+    if provenance["source"] == "local_csv":
+        provenance = local_csv_provenance(payload, request.timeframe)
+        manifests = provenance["datasets"]
     return payload, provenance, manifests
 
 
@@ -81,7 +85,7 @@ def create_strategy_lab_run(request: StrategyLabRequest):
             cache_range = f"{request.start_date or 'FULL'}:{request.end_date or 'FULL'}"
             keys = {symbol.upper(): f"{manifest.get('snapshot_id')}:{manifest.get('data_sha256')}:{FORMULA_VERSION}:{cache_range}" for symbol, manifest in manifests.items()}
             return StrategyLabService(config).run(payload, data_provenance=provenance, forecast_cache=run_store.cache, forecast_keys=keys, progress=progress)
-        return run_store.create_or_reuse(frozen_request, manifests, runner)
+        return run_store.create_or_reuse(frozen_request, manifests, runner, research_context={"formula": FORMULA_VERSION})
     except FileNotFoundError as error:
         raise HTTPException(404, f"DATASET_NOT_FOUND: {error}")
     except ValueError as error:

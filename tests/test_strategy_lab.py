@@ -53,6 +53,8 @@ def test_strategy_matrix_is_pre_registered_and_fingerprinted():
     assert len(result["strategies"]) == len(ENTRY_RULES) * len(EXIT_RULES)
     assert result["run_metadata"]["execution"] == "signal-day close; next-trading-day open"
     assert result["run_metadata"]["fingerprint"]
+    assert result["run_metadata"]["parameters"]["symbols"] == ["AAA"]
+    assert result["run_metadata"]["parameters"]["periods"]["AAA"]["bar_count"] == 170
     assert all(item["research_assessment"]["label"] != "WORTH_CONTINUING" for item in result["strategies"])
 
 
@@ -77,3 +79,9 @@ def test_research_run_reuses_identical_fingerprint_and_persists_result(tmp_path)
             break
         time.sleep(.02)
     assert store.result(first["run_id"]) == {"strategies": []}
+
+
+def test_research_run_fingerprint_changes_with_formula_context(tmp_path):
+    store = StrategyLabRunStore(tmp_path / "runs")
+    request, snapshots = {"symbols": ["US.SPY"]}, {"US.SPY": {"data_sha256": "abc"}}
+    assert store.fingerprint(request, snapshots, {"formula": "V1"}) != store.fingerprint(request, snapshots, {"formula": "V2"})

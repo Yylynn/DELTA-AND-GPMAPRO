@@ -68,6 +68,11 @@ def itd_structure(symbol: str, timeframe: str = "1d", snapshot_id: str | None = 
     # chart annotation gets a date guaranteed to exist on this chart's axis.
     for point in analysis["points"]:
         point["display_date"] = display_projection.get(point["date"], point["date"])
+    for ibp in analysis.get("reversal", {}).get("ibps", []):
+        ibp["display_date"] = display_projection.get(ibp["date"], ibp["date"])
+    for window in analysis.get("reversal", {}).get("windows", []):
+        window["display_start"] = display_projection.get(window["window_start"], window["window_start"])
+        window["display_end"] = display_projection.get(window["window_end"], window["window_end"])
     if analysis.get("boundary_point"):
         boundary = analysis["boundary_point"]
         boundary["display_date"] = display_projection.get(boundary["date"], boundary["date"])

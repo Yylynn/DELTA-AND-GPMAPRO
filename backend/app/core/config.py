@@ -10,6 +10,8 @@ class Settings(BaseSettings):
     news_rss_timeout_seconds: int = 15
     news_cnbc_enabled: bool = True
     news_marketwatch_enabled: bool = True
+    finnhub_api_key: str = ""
+    sec_user_agent: str = "DELTA-Research-Terminal/0.1 research@example.invalid"
     model_config = SettingsConfigDict(env_file="../.env", env_prefix="DELTA_", case_sensitive=False, extra="ignore")
     @property
     def allowed_origins(self) -> list[str]:

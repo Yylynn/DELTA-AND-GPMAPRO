@@ -1,6 +1,7 @@
 import json
 
 import pandas as pd
+import pytest
 
 from app.api.itd import project_display_dates
 from app.services.futu_snapshot import FutuSnapshotService
@@ -18,6 +19,21 @@ def test_snapshot_load_is_separate_from_imported_csv_and_lists_newest_first(tmp_
     loaded, metadata = service.load(first["snapshot_id"])
     assert len(loaded) == 2 and metadata["source"] == "futu_opend_snapshot"
     assert len(metadata["data_sha256"]) == 64
+
+
+def test_snapshot_load_rejects_csv_that_no_longer_matches_manifest(tmp_path):
+    service = FutuSnapshotService(tmp_path)
+    snapshot_id = "US_TEST_1D_QFQ_20240101T000000Z"
+    original = pd.DataFrame({"date": ["2024-01-02"], "open": [10], "high": [11], "low": [9], "close": [10], "volume": [100]})
+    payload = original.to_csv(index=False, lineterminator="\n").encode("utf-8")
+    import hashlib
+    manifest = {"snapshot_id": snapshot_id, "code": "US.TEST", "timeframe": "1d", "autype": "QFQ", "fetched_at": "20240101T000000Z", "data_sha256": hashlib.sha256(payload).hexdigest()}
+    original.to_csv(tmp_path / f"{snapshot_id}.csv", index=False)
+    (tmp_path / f"{snapshot_id}.json").write_text(json.dumps(manifest), encoding="utf-8")
+    tampered = original.astype({"close": float}); tampered.loc[0, "close"] = 10.5
+    tampered.to_csv(tmp_path / f"{snapshot_id}.csv", index=False)
+    with pytest.raises(ValueError, match="SNAPSHOT_INTEGRITY_ERROR"):
+        service.load(snapshot_id)
 
 
 def test_snapshot_codes_are_market_qualified_and_not_aapl_specific(tmp_path):

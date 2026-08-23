@@ -3,6 +3,7 @@ from pydantic import BaseModel, Field
 
 from app.api.data import bars_for_source, bars_for_timeframe
 from app.services.walk_forward import WalkForwardService
+from app.services.research_metadata import local_csv_provenance, research_run_metadata
 
 router = APIRouter(tags=["walk-forward"])
 
@@ -26,9 +27,15 @@ def walk_forward(request: WalkForwardRequest):
             bars, snapshot = bars_for_source(symbols[0], request.timeframe, request.snapshot_id)
             payload, provenance = {symbols[0]: bars}, {"source": "futu_opend_snapshot", "snapshot_id": request.snapshot_id, "code": snapshot["code"], "timeframe": snapshot["timeframe"], "autype": snapshot.get("autype"), "data_sha256": snapshot.get("data_sha256")}
         else:
-            payload, provenance = {symbol: bars_for_timeframe(symbol, request.timeframe)[0] for symbol in symbols}, {"source": "local_csv", "timeframe": request.timeframe}
+            payload = {symbol: bars_for_timeframe(symbol, request.timeframe)[0] for symbol in symbols}
+            provenance = local_csv_provenance(payload, request.timeframe)
         result = WalkForwardService().run(payload, horizon=request.horizon, cost_bps=request.cost_bps_per_side, test_bars=request.test_bars, step_bars=request.step_bars, min_history_bars=request.min_history_bars)
         result["data_provenance"] = provenance
+        result["run_metadata"] = research_run_metadata(
+            parameters=request.model_dump(exclude={"snapshot_id"}),
+            data_provenance=provenance,
+            stable_context={"strategy": result["strategy"], "validation": "walk_forward"},
+        )
         return result
     except FileNotFoundError as error: raise HTTPException(404, f"DATASET_NOT_FOUND: {error}")
     except ValueError as error: raise HTTPException(422, str(error))

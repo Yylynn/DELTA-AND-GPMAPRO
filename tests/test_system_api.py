@@ -8,6 +8,16 @@ def test_version_returns_version_information() -> None:
     response = TestClient(app).get("/api/version")
     assert response.status_code == 200
     assert response.json()["version"] == "0.1.0"
+    assert {"git_commit", "git_dirty", "app_version"} <= set(response.json())
+
+
+def test_system_status_reports_application_and_opend_state() -> None:
+    response = TestClient(app).get("/api/system/status")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "ok"
+    assert {"name", "app_version", "git_commit", "git_dirty"} <= set(body["application"])
+    assert {"connected", "connection_check", "connection_status", "host", "port", "sdk_version", "last_snapshot_at", "snapshot_count"} <= set(body["opend"])
 
 
 def test_decision_api_has_a_stable_snapshot_schema() -> None:

@@ -12,7 +12,7 @@ def bars(count=80):
 
 def test_snapshot_has_stable_research_contract_and_no_trade_action():
     snapshot = EvidenceEngine().snapshot(bars(), "aapl", "1d")
-    assert set(snapshot) == {"symbol", "timeframe", "as_of", "evidence_balance", "scores", "confidence", "evidence", "conflicts", "data_quality", "summary"}
+    assert set(snapshot) == {"symbol", "timeframe", "as_of", "evidence_balance", "scores", "confidence", "evidence", "conflicts", "data_quality", "news_trace", "summary"}
     assert snapshot["evidence_balance"] in {"BULLISH", "BEARISH", "BALANCED", "MIXED", "INSUFFICIENT"}
     assert {item["source"] for item in snapshot["evidence"]} >= {"GPMAPRO", "VOLUME", "DATA"}
     assert all("BUY" not in line and "SELL" not in line for line in snapshot["summary"])

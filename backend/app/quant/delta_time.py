@@ -17,6 +17,13 @@ class ITDConfig(BaseModel):
     fixed_n: int = Field(default=12, ge=12, le=12)
     manual_n: int | None = Field(default=None, ge=12, le=12)
     candidate_half_window_days: float = Field(default=7, gt=0, le=30)
+    reversal_enabled: bool = True
+    reversal_swing_left: int = Field(default=2, ge=1, le=10)
+    reversal_swing_right: int = Field(default=2, ge=1, le=10)
+    reversal_atr_period: int = Field(default=14, ge=2, le=100)
+    reversal_min_excursion_atr: float = Field(default=1.0, gt=0, le=10)
+    reversal_ai_enabled: bool = True
+    reversal_ai_threshold: float = Field(default=.80, ge=0, le=1)
 class DeltaWindow(BaseModel):
     event_id: str; event_type: DeltaEventType; cycle_type: str; anchor_date: date; expected_date: date; window_start: date; window_end: date; tolerance_days: int=Field(ge=0); confidence: float=Field(ge=0,le=1); source: str; metadata: dict={}
 class ManualDeltaEngine:
@@ -40,7 +47,43 @@ def fixed_cycle_grid(anchor_dates,display_dates):
         out.append({"id":f"itd-phase-{i}","anchor_date":a.isoformat(),"calendar_date":a.isoformat(),"display_date":(visible[-1] if visible else display_dates[0]).isoformat(),"color":_phase(i//(ITD_TRADING_BARS//4)),"phase_index":(i//(ITD_TRADING_BARS//4))%4,"cycle":i//ITD_TRADING_BARS+1,"source_bar_index":i,"is_future":False})
     return out
 def lunar_grid(start,end,trading_dates,future_lines=8): return fixed_cycle_grid(trading_dates,trading_dates)
-def detect_reversal(points,n): return {"state":"normal","itw_active":bool(points and points[-1]["number"] in {n,1,2}),"window":[n,1,2],"reason":"skill-style sequence enforces alternation"}
+REVERSAL_NORMAL = "NORMAL"
+REVERSAL_OPEN = "ITW_OPEN"
+REVERSAL_CONFIRMED = "INVERSION_CONFIRMED"
+REVERSAL_DOUBLE = "DOUBLE_INVERSION_CONFIRMED"
+REVERSAL_CLOSED = "ITW_CLOSED"
+
+def _atr(data: pd.DataFrame, period: int) -> pd.Series:
+    previous = data["close"].shift(1)
+    true_range = pd.concat([(data["high"] - data["low"]).abs(), (data["high"] - previous).abs(), (data["low"] - previous).abs()], axis=1).max(axis=1)
+    return true_range.rolling(period, min_periods=1).mean()
+
+def _swing_candidates(data: pd.DataFrame, left: int, right: int) -> list[dict]:
+    """Return only pivots that were knowable after ``right`` additional bars."""
+    out = []
+    for index in range(left, len(data) - right):
+        lo, hi = index - left, index + right + 1
+        if float(data.high.iloc[index]) == float(data.high.iloc[lo:hi].max()):
+            out.append({"bar_index": index, "type": "HIGH", "price": float(data.high.iloc[index]), "confirmed_index": index + right})
+        if float(data.low.iloc[index]) == float(data.low.iloc[lo:hi].min()):
+            out.append({"bar_index": index, "type": "LOW", "price": float(data.low.iloc[index]), "confirmed_index": index + right})
+    return out
+
+def _reversal_ai_score(data: pd.DataFrame, atr: pd.Series, candidate: dict | None) -> dict:
+    """Transparent probability proxy until labelled inversion data exists.
+
+    This deliberately is not a black-box prediction.  It exposes each input
+    so a later trained classifier can keep the same response contract.
+    """
+    index = candidate["bar_index"] if candidate else len(data) - 1
+    current_atr = max(float(atr.iloc[index]), 1e-9)
+    start = max(0, index - 20)
+    trend = abs(float(data.close.iloc[index]) - float(data.close.iloc[start])) / (current_atr * max(1, index - start))
+    volume_mean = float(data.volume.iloc[start:index + 1].mean()) or 1.0
+    volume_ratio = float(data.volume.iloc[index]) / volume_mean
+    excursion_atr = abs(candidate["price"] - candidate["prior_price"]) / current_atr if candidate else 0.0
+    probability = min(.95, .15 + min(.35, excursion_atr * .20) + min(.20, trend * .20) + min(.15, volume_ratio * .05))
+    return {"model": "AUDITABLE_HEURISTIC_V1", "available": True, "probability": round(probability, 4), "features": {"excursion_atr": round(excursion_atr, 4), "trend_atr_per_bar": round(trend, 4), "volume_ratio": round(volume_ratio, 4)}}
 
 class ITDDeltaEngine:
     def __init__(self,config=None): self.config=config or ITDConfig()
@@ -154,12 +197,102 @@ class ITDDeltaEngine:
             "confidence": round(min(.9, .35 + .08 * len(gaps)), 2),
             "observed_boundary_date": boundary["date"],
         }
+    def _apply_reversals(self, data: pd.DataFrame, points: list[dict], dates: list[date]) -> dict:
+        """Detect causal IBPs in each M -> 1 -> 2 window and apply their mapping.
+
+        The time/number grid remains immutable.  An inversion changes only a
+        point's HIGH/LOW role after the IBP becomes confirmed, never the grid
+        date itself.  This keeps prefix replays causal: a prefix cannot see an
+        IBP whose right-hand swing confirmation bar has not yet arrived.
+        """
+        empty = {"state": REVERSAL_NORMAL, "itw_active": False, "window": [12, 1, 2], "windows": [], "ibps": [], "candidates": [], "effective_mapping": {}, "state_history": [], "ai": {"available": self.config.reversal_ai_enabled, "threshold": self.config.reversal_ai_threshold}}
+        if not self.config.reversal_enabled or len(points) < 3:
+            return empty
+        atr = _atr(data, self.config.reversal_atr_period)
+        swings = _swing_candidates(data, self.config.reversal_swing_left, self.config.reversal_swing_right)
+        windows, all_ibps, all_candidates, states = [], [], [], []
+        # A numbered point is represented once per 118-bar unit.  Only a
+        # completed M/1/2 boundary can be closed; a live one stays ITW_OPEN.
+        by_cycle = {}
+        for point in points:
+            by_cycle.setdefault(point["cycle"], {})[point["number"]] = point
+            point["base_type"] = point["type"]
+            point["reversal_effective_on"] = None
+        for cycle, unit in sorted(by_cycle.items()):
+            previous = by_cycle.get(cycle - 1, {})
+            m, one, two = previous.get(12), unit.get(1), unit.get(2)
+            if not m or not one:
+                continue
+            end = two["bar_index"] if two else len(data) - 1
+            candidates: list[dict] = []
+            # M' is a same-role swing as the normally expected #1, but before
+            # #1's time slot.  1' is similarly a #2-role swing before #2.
+            phases = (("M'", m, one, m["bar_index"], one["bar_index"]),)
+            if two:
+                phases += (("1'", one, two, one["bar_index"], two["bar_index"]),)
+            for label, prior, expected, start, finish in phases:
+                matches = [candidate for candidate in swings if start < candidate["bar_index"] < finish and candidate["type"] == expected["base_type"]]
+                if not matches:
+                    continue
+                # Pick the most meaningful excursion, not merely the first
+                # small local wiggle.  The ATR is sampled at the candidate.
+                candidate = max(matches, key=lambda value: abs(value["price"] - prior["price"]))
+                threshold = float(atr.iloc[candidate["bar_index"]]) * self.config.reversal_min_excursion_atr
+                excursion = abs(candidate["price"] - prior["price"])
+                if excursion < threshold:
+                    continue
+                confirmed_index = candidate["confirmed_index"]
+                if confirmed_index >= len(dates):
+                    continue
+                score_input = {**candidate, "prior_price": prior["price"]}
+                ai = _reversal_ai_score(data, atr, score_input) if self.config.reversal_ai_enabled else {"model": "DISABLED", "available": False, "probability": None, "features": {}}
+                item = {"id": f"itd-ibp-{cycle}-{label.replace(chr(39), 'prime')}", "label": label, "cycle": cycle, "type": candidate["type"], "date": dates[candidate["bar_index"]].isoformat(), "actual_date": dates[candidate["bar_index"]].isoformat(), "price": candidate["price"], "bar_index": candidate["bar_index"], "confirmed_on": dates[confirmed_index].isoformat(), "tradable_on": dates[confirmed_index + 1].isoformat() if confirmed_index + 1 < len(dates) else None, "excursion": round(excursion, 6), "atr": round(float(atr.iloc[candidate["bar_index"]]), 6), "threshold": round(threshold, 6), "ai": ai, "ai_gate_passed": bool(ai["available"] and ai["probability"] >= self.config.reversal_ai_threshold)}
+                candidates.append(item)
+            candidates.sort(key=lambda value: value["bar_index"])
+            accepted = [item for item in candidates if item["ai_gate_passed"]][:2]
+            # A single IBP flips the mapping after its location.  Two IBPs
+            # restore it after the second point, exactly as the theory's
+            # double inversion example specifies.
+            for ordinal, ibp in enumerate(accepted, start=1):
+                ibp["ordinal"] = ordinal
+                flip_from = one if ibp["label"] == "M'" else two
+                if not flip_from:
+                    continue
+                should_flip = ordinal == 1
+                for point in points:
+                    if point["cycle"] < cycle or (point["cycle"] == cycle and point["bar_index"] < flip_from["bar_index"]):
+                        continue
+                    if should_flip:
+                        point["type"] = "LOW" if point["base_type"] == "HIGH" else "HIGH"
+                    else:
+                        point["type"] = point["base_type"]
+                    point["reversal_effective_on"] = ibp["confirmed_on"]
+                states.append({"cycle": cycle, "state": REVERSAL_CONFIRMED if ordinal == 1 else REVERSAL_DOUBLE, "effective_on": ibp["confirmed_on"], "ibp_id": ibp["id"]})
+            state = REVERSAL_OPEN
+            if len(accepted) == 1:
+                state = REVERSAL_CONFIRMED
+            elif len(accepted) >= 2:
+                state = REVERSAL_DOUBLE
+            max_probability = max((item["ai"]["probability"] or 0 for item in candidates), default=0)
+            if not accepted and max_probability >= self.config.reversal_ai_threshold:
+                state = "AI_WATCH"
+            elif not accepted and not two:
+                state = "ITW_WATCH"
+            # Completed windows with no approved IBP are deliberately omitted
+            # from the user-facing list: normal alternation is the baseline,
+            # not a reversal event.
+            window = {"id": f"itw-{cycle}", "cycle": cycle, "state": state, "window_start": m["date"], "window_end": two["date"] if two else dates[-1].isoformat(), "m_date": m["date"], "one_date": one["date"], "two_date": two["date"] if two else None, "ibp_ids": [item["id"] for item in accepted], "candidate_ids": [item["id"] for item in candidates], "closed": two is not None, "ai_probability": round(max_probability, 4)}
+            if not two or accepted or state == "AI_WATCH":
+                windows.append(window)
+            all_ibps.extend(accepted); all_candidates.extend(candidates)
+        latest = windows[-1] if windows else None
+        return {"state": latest["state"] if latest else REVERSAL_NORMAL, "itw_active": bool(latest and not latest["closed"]), "window": [12, 1, 2], "windows": windows, "ibps": all_ibps, "candidates": all_candidates, "effective_mapping": {point["id"]: point["type"] for point in points}, "state_history": states, "ai": {"available": self.config.reversal_ai_enabled, "threshold": self.config.reversal_ai_threshold}}
     def analyze(self,frame):
         need={"date","open","high","low","close","volume"}
         if not need.issubset(frame.columns):raise ValueError("ITD requires date, open, high, low, close and volume")
         data=frame.copy().sort_values("date").reset_index(drop=True); data["date"]=pd.to_datetime(data.date); dates=[_day(x) for x in data.date]; span=(dates[-1]-dates[0]).days+1 if dates else 0
         base={"model":"Skill DELTA ITD","sequence_length":12,"sequence_length_mode":"fixed","itd_calendar_days":ITD_CALENDAR_DAYS,"color_phase_days":COLOR_PHASE_DAYS,"min_gap_trading_days":MIN_GAP_TRADING_DAYS,"bar_count":len(data),"calendar_span_days":span,"required_calendar_days":MIN_HISTORY_CALENDAR_DAYS,"recommended_bars":MIN_RECOMMENDED_BARS}
-        if len(data)<ITD_TRADING_BARS:return {**base,"status":"INSUFFICIENT_HISTORY","grid_lines":[],"cycle_boundaries":[],"points":[],"confirmed_points":[],"candidate_points":[],"boundary_point":None,"next_prediction":None,"future_predictions":[],"transition_table":[],"reversal":detect_reversal([],12)}
+        if len(data)<ITD_TRADING_BARS:return {**base,"status":"INSUFFICIENT_HISTORY","grid_lines":[],"cycle_boundaries":[],"points":[],"confirmed_points":[],"candidate_points":[],"boundary_point":None,"next_prediction":None,"future_predictions":[],"transition_table":[],"reversal":{"state":REVERSAL_NORMAL,"itw_active":False,"window":[12,1,2],"windows":[],"ibps":[],"effective_mapping":{},"state_history":[]}}
         raw=[]; high=True; prev=-999999; units=(len(data)+117)//118
         for cycle in range(units):
             start=cycle*118; count=min(118,len(data)-start)
@@ -181,6 +314,7 @@ class ITDDeltaEngine:
             else:
                 confirmed = None
             p["confirmed_on"]=confirmed; ci=next((i for i,d in enumerate(dates) if confirmed and d.isoformat()==confirmed),None); p["tradable_on"]=dates[ci+1].isoformat() if ci is not None and ci+1<len(dates) else None; p["confirmed"]=(not is_terminal) and p["tradable_on"] is not None
+        reversal = self._apply_reversals(data, raw, dates)
         confirmed=[p for p in raw if p["confirmed"]]
         # Historical transition samples use confirmed, stock-specific extrema;
         # the live boundary only supplies the starting number/date.
@@ -196,9 +330,10 @@ class ITDDeltaEngine:
             next_occurrence=next((item for item in all_pred if item["number"] == n), None)
             table.append({"number":n,"sample_count":len(sample),"mean_days":round(statistics.mean(sample),2) if sample else None,"std_days":round(statistics.stdev(sample),2) if len(sample)>=2 else None,"last_interval_days":sample[-1] if sample else None,"prediction":next_occurrence})
         bounds=[{"id":f"itd-{i//118+1}","date":dates[i].isoformat(),"label":f"ITD{i//118+1}"} for i in range(0,len(dates),118)]
-        return {**base,"status":"READY" if confirmed else "STRUCTURE_ONLY","sequence_label":"Skill DELTA ITD (118 bars, N=12)","complete_units":len(data)//118,"grid_lines":fixed_cycle_grid(dates,dates),"cycle_boundaries":bounds,"points":raw,"confirmed_points":confirmed,"candidate_points":[p for p in raw if not p["confirmed"]],"boundary_point":raw[-1] if raw else None,"next_prediction":pred[0] if pred else None,"future_predictions":pred,"transition_predictions":all_pred,"transition_table":table,"reversal":detect_reversal(confirmed,12),"history_confidence":"SUFFICIENT" if len(data)>=756 else "LIMITED"}
+        return {**base,"status":"READY" if confirmed else "STRUCTURE_ONLY","sequence_label":"Skill DELTA ITD (118 bars, N=12)","complete_units":len(data)//118,"grid_lines":fixed_cycle_grid(dates,dates),"cycle_boundaries":bounds,"points":raw,"confirmed_points":confirmed,"candidate_points":[p for p in raw if not p["confirmed"]],"boundary_point":raw[-1] if raw else None,"next_prediction":pred[0] if pred else None,"future_predictions":pred,"transition_predictions":all_pred,"transition_table":table,"reversal":reversal,"history_confidence":"SUFFICIENT" if len(data)>=756 else "LIMITED"}
     def signal_windows(self,frame):
         a=self.analyze(frame); p=a.get("next_prediction"); pts=a.get("confirmed_points",[])
         if not p or not pts:return []
-        return [{"event_id":p["id"],"event_type":p["type"],"cycle_type":"SKILL_ITD","anchor_date":pts[-1]["date"],"expected_date":p["expected_date"],"window_start":p["window_start"],"window_end":p["window_end"],"tolerance_days":0,"confidence":p["confidence"],"source":"skill-itd","metadata":{"number":p["number"],"phase":"predicted"}}]
+        reversal = a.get("reversal", {})
+        return [{"event_id":p["id"],"event_type":p["type"],"cycle_type":"SKILL_ITD","anchor_date":pts[-1]["date"],"expected_date":p["expected_date"],"window_start":p["window_start"],"window_end":p["window_end"],"tolerance_days":0,"confidence":p["confidence"],"source":"skill-itd","metadata":{"number":p["number"],"phase":"predicted","reversal_state":reversal.get("state", REVERSAL_NORMAL),"reversal_effective_on":pts[-1].get("reversal_effective_on")}}]
     def events_for_signal(self,frame): return self.signal_windows(frame)

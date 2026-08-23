@@ -10,6 +10,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Callable
 
+from app.services.research_metadata import code_identity
+
 
 class ForecastCache:
     def __init__(self, root: Path):
@@ -71,12 +73,13 @@ class StrategyLabRunStore:
         temp.replace(path)
 
     @staticmethod
-    def fingerprint(request: dict, snapshots: dict[str, dict]) -> str:
-        stable = {"request": request, "snapshots": snapshots}
+    def fingerprint(request: dict, snapshots: dict[str, dict], research_context: dict | None = None) -> str:
+        identity = code_identity()
+        stable = {"request": request, "snapshots": snapshots, "research_context": research_context or {}, "code": {"git_commit": identity["git_commit"], "workspace_fingerprint": identity["workspace_fingerprint"]}}
         return hashlib.sha256(json.dumps(stable, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
-    def create_or_reuse(self, request: dict, snapshots: dict[str, dict], runner: Callable) -> dict:
-        fingerprint = self.fingerprint(request, snapshots)
+    def create_or_reuse(self, request: dict, snapshots: dict[str, dict], runner: Callable, research_context: dict | None = None) -> dict:
+        fingerprint = self.fingerprint(request, snapshots, research_context)
         with self._lock:
             for path in self.root.glob("*.json"):
                 try:
@@ -88,7 +91,7 @@ class StrategyLabRunStore:
             if self._active:
                 raise RuntimeError("A full-history strategy research run is already active")
             run_id = hashlib.sha256(f"{fingerprint}:{datetime.now(UTC).isoformat()}".encode()).hexdigest()[:16]
-            payload = {"run_id": run_id, "fingerprint": fingerprint, "status": "QUEUED", "created_at": datetime.now(UTC).isoformat(), "request": request, "snapshots": snapshots, "progress": {"stage": "queued", "progress": 0.0, "completed_symbols": 0, "total_symbols": len(snapshots), "symbol": None}, "result": None, "error": None}
+            payload = {"run_id": run_id, "fingerprint": fingerprint, "status": "QUEUED", "created_at": datetime.now(UTC).isoformat(), "request": request, "snapshots": snapshots, "research_context": research_context or {}, "progress": {"stage": "queued", "progress": 0.0, "completed_symbols": 0, "total_symbols": len(snapshots), "symbol": None}, "result": None, "error": None}
             self._write(run_id, payload)
             self._active = run_id
             thread = threading.Thread(target=self._execute, args=(run_id, runner), daemon=True, name=f"strategy-lab-{run_id}")
@@ -131,9 +134,11 @@ class StrategyLabRunStore:
 
     def export_csv(self, run_id: str) -> str:
         result = self.result(run_id)
-        rows = [["entry_rule", "exit_rule", "sample_count", "average_net_return", "random_average_net_return", "b_only_average_net_return", "edge_vs_random", "assessment", "failed_checks"]]
+        metadata = result.get("run_metadata", {})
+        provenance = metadata.get("data_provenance", {})
+        rows = [["entry_rule", "exit_rule", "sample_count", "average_net_return", "random_average_net_return", "b_only_average_net_return", "edge_vs_random", "assessment", "failed_checks", "run_fingerprint", "git_commit", "generated_at", "data_provenance"]]
         for item in result["strategies"]:
-            rows.append([item["entry_rule"], item["exit_rule"], item["metrics"]["sample_count"], item["metrics"]["average_net_return"], item["random_baseline"]["average_net_return"], item["b_only_baseline"]["average_net_return"], item["net_edge_vs_random"], item["research_assessment"]["label"], ";".join(item["research_assessment"]["failed_checks"])])
+            rows.append([item["entry_rule"], item["exit_rule"], item["metrics"]["sample_count"], item["metrics"]["average_net_return"], item["random_baseline"]["average_net_return"], item["b_only_baseline"]["average_net_return"], item["net_edge_vs_random"], item["research_assessment"]["label"], ";".join(item["research_assessment"]["failed_checks"]), metadata.get("fingerprint"), metadata.get("git_commit"), metadata.get("generated_at"), json.dumps(provenance, ensure_ascii=False, sort_keys=True)])
         from io import StringIO
         output = StringIO(); writer = csv.writer(output); writer.writerows(rows)
         return output.getvalue()

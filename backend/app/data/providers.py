@@ -41,5 +41,23 @@ def validate_ohlcv(df: pd.DataFrame):
     invalid=df["date"].isna()|df[REQUIRED[1:]].isna().any(axis=1)|(df[["open","high","low","close"]]<=0).any(axis=1)|(df["volume"]<0)|(df["high"]<df[["open","close","low"]].max(axis=1))|(df["low"]>df[["open","close","high"]].min(axis=1))
     missing_count=int(invalid.sum()); df=df.loc[~invalid]; duplicate_count=int(df.duplicated("date").sum()); df=df.drop_duplicates("date",keep="last").sort_values("date")
     if df.empty: raise ValueError("CSV没有可用的OHLCV记录")
-    quality={"start_date":df.date.iloc[0].date().isoformat(),"end_date":df.date.iloc[-1].date().isoformat(),"bar_count":len(df),"missing_count":missing_count,"duplicate_count":duplicate_count,"quality":"通过" if missing_count==0 else "已清洗"}
+    zero_volume = df["volume"].eq(0)
+    zero_volume_count = int(zero_volume.sum())
+    if zero_volume_count:
+        groups = zero_volume.ne(zero_volume.shift()).cumsum()
+        max_consecutive_zero_volume = int(zero_volume.groupby(groups).sum().max())
+    else:
+        max_consecutive_zero_volume = 0
+    zero_volume_status = (
+        "ALL_ZERO" if zero_volume_count == len(df)
+        else "CONSECUTIVE" if max_consecutive_zero_volume >= 2
+        else "ISOLATED" if zero_volume_count
+        else "NONE"
+    )
+    warnings = []
+    if zero_volume_status == "ALL_ZERO": warnings.append("全部记录的成交量均为零，数据不可用于量能研究。")
+    elif zero_volume_status == "CONSECUTIVE": warnings.append("存在连续零成交量记录，请检查停牌、市场类型或数据源完整性。")
+    elif zero_volume_status == "ISOLATED": warnings.append("存在孤立零成交量记录，请在量能研究前复核。")
+    quality_label = "已清洗" if missing_count else "需复核" if warnings else "通过"
+    quality={"start_date":df.date.iloc[0].date().isoformat(),"end_date":df.date.iloc[-1].date().isoformat(),"bar_count":len(df),"missing_count":missing_count,"duplicate_count":duplicate_count,"zero_volume_count":zero_volume_count,"max_consecutive_zero_volume":max_consecutive_zero_volume,"zero_volume_status":zero_volume_status,"warnings":warnings,"quality":quality_label}
     df["date"]=df.date.dt.strftime("%Y-%m-%d"); return df,quality

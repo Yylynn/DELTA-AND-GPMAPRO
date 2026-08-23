@@ -26,6 +26,13 @@ py -3.12 -m venv .venv-local
 .\.venv-local\Scripts\python.exe -m pip install -e .\backend[dev]
 ```
 
+OpenD 行情功能还需要 Futu Python SDK。上述安装命令会自动安装它；若页面提示 `Futu Python SDK is not installed`，说明后端不是由项目启动脚本使用的虚拟环境启动。关闭该后端后重新运行 `02_启动开发版.bat`，或在实际运行后端的环境中执行：
+
+```powershell
+cd backend
+..\.venv-local\Scripts\python.exe -m pip install -e .[dev]
+```
+
 ## 验证
 
 ```powershell

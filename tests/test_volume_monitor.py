@@ -1,6 +1,9 @@
 from datetime import date
 import pandas as pd
+import pytest
+from fastapi.testclient import TestClient
 
+from app.main import app
 from app.services.data_freshness import freshness_snapshot
 from app.services.volume_monitor import VolumeMonitor
 
@@ -40,3 +43,29 @@ def test_freshness_states_and_weekend_are_calendar_conservative():
     assert freshness_snapshot("2026-08-04", 10, date(2026, 8, 10))["freshness"] == "STALE"
     assert freshness_snapshot("2026-07-31", 10, date(2026, 8, 10))["freshness"] == "VERY_STALE"
     assert freshness_snapshot(None, 0)["freshness"] == "UNKNOWN"
+
+
+def test_all_zero_volume_is_rejected_in_snapshot_and_series_remains_json_safe(monkeypatch):
+    source = bars([0, 0, 0])
+    monitor = VolumeMonitor()
+    with pytest.raises(ValueError, match="positive volume baseline"):
+        monitor.snapshot(source, "ZERO", "1d")
+    assert [row["relative_volume"] for row in monitor.series(source)] == [None, None, None]
+
+    from app.api import volume as volume_api
+    monkeypatch.setattr(volume_api, "bars_for_source", lambda *_: (source, {"source": "test"}))
+    client = TestClient(app)
+    assert client.get("/api/volume/ZERO").status_code == 422
+    series = client.get("/api/volume/ZERO/series")
+    assert series.status_code == 200
+    assert all(row["relative_volume"] is None for row in series.json()["series"])
+
+
+def test_zero_short_average_is_json_safe_when_long_average_exists(monkeypatch):
+    source = bars([100] * 15 + [0] * 5)
+    from app.api import volume as volume_api
+    monkeypatch.setattr(volume_api, "bars_for_source", lambda *_: (source, {"source": "test"}))
+    response = TestClient(app).get("/api/volume/ZERO5")
+    assert response.status_code == 200
+    assert response.json()["volume_ratio_5"] is None
+    assert response.json()["relative_volume"] == 0
