@@ -1,10 +1,11 @@
 from fastapi import APIRouter, HTTPException
 
 from app.api.data import bars_for_source
+from app.services.news_runtime import get_news_advice_service
 from app.services.signal_interpretation import SignalInterpretationService
 
 router = APIRouter(tags=["signal interpretation"])
-service = SignalInterpretationService()
+service = SignalInterpretationService(get_news_advice_service())
 
 
 @router.get("/interpretation/{symbol}")

@@ -32,9 +32,12 @@ def test_news_factor_snapshot_ranks_point_in_time_company_news(tmp_path) -> None
     pd.DataFrame({"date": dates, "open": range(100, 240), "high": range(101, 241), "low": range(99, 239), "close": range(100, 240), "volume": [1_000_000] * len(dates)}).to_csv(imported / "AAPL.csv", index=False)
     service = NewsFactorService(StubNews(), tmp_path / "news_cache")
     snapshot = service.snapshot(refresh=False)
+    duplicate = service.snapshot(refresh=False)
     result = service.candidates()
     assert snapshot["symbols_captured"] == 30
-    assert snapshot["schema_version"] == 2
+    assert snapshot["schema_version"] == 3
+    assert duplicate["snapshot_id"] == snapshot["snapshot_id"]
+    assert duplicate["idempotent"] is True
     assert result["status"] == "RESEARCH_ONLY"
     assert result["candidates"][0]["symbol"] == "US.AAPL"
     assert result["candidates"][0]["news_score"] > 0

@@ -7,7 +7,9 @@ type Indicator = { indicator: "GPMAPRO" | "GPMA2"; source_status: string; script
 type Action = "BUY" | "ACCUMULATE" | "HOLD" | "REDUCE" | "SELL";
 type Audit = { bars: number; action_counts: Partial<Record<Action, number>>; blocked_by: Array<{ reason: string; count: number }>; candidates: Array<{ date: string; action: Action; label: string; eligible: boolean; blocked_by: string[] }> };
 type SignalDetail = { source: "DELTA" | "GPMAPRO" | "GPMA2"; signal_code: string; date: string; plain_language: string; market_context: string; action_impact: string; confidence: string; why_now: string; what_invalidates_it: string };
-type Interpretation = { action: Action; action_label: string; action_strength: number; position_guidance: string; rule_id: string; next_steps: string[]; as_of: string; drivers: Array<{ id: string; title: string; status: string; detail: string; date?: string | null }>; evidence: Evidence[]; signal_details: SignalDetail[]; missing_conditions: string[]; conflicts: string[]; blocked_by: string[]; audit?: Audit; indicators: Indicator[]; validation: { status: string; message: string } };
+type NewsOverlay = { status: string; action: Action; bias: string; score: number; confidence: number; validation_status: string; reason: string; base_action: Action; base_action_strength: number; action_strength: number; requested_points: number; applied_points: number; effect: "NONE" | "CONFIRM" | "DOWNGRADE" };
+type Driver = { id: string; title: string; status: string; detail: string; date?: string | null; detail_target?: "NEWS_CENTER" };
+type Interpretation = { base_action: Action; base_action_label: string; base_action_strength: number; action: Action; action_label: string; action_strength: number; position_guidance: string; news_overlay: NewsOverlay; rule_id: string; next_steps: string[]; as_of: string; drivers: Driver[]; evidence: Evidence[]; signal_details: SignalDetail[]; missing_conditions: string[]; conflicts: string[]; blocked_by: string[]; audit?: Audit; indicators: Indicator[]; validation: { status: string; message: string } };
 
 async function getInterpretation(path: string): Promise<Interpretation> {
   const response = await fetch(path);
@@ -31,7 +33,7 @@ const driverClass = (status: string) => {
 };
 
 /** Concise long-only action dashboard. It has no broker or order controls. */
-export function SignalInterpretation({ symbol, timeframe, snapshotId, onFocusDate }: { symbol: string; timeframe: string; snapshotId?: string; onFocusDate: (date: string) => void }) {
+export function SignalInterpretation({ symbol, timeframe, snapshotId, onFocusDate, onOpenNews }: { symbol: string; timeframe: string; snapshotId?: string; onFocusDate: (date: string) => void; onOpenNews?: (symbol: string) => void }) {
   const [selectedDetail, setSelectedDetail] = useState<SignalDetail["source"] | null>(null);
   const snapshotQuery = snapshotId ? `&snapshot_id=${encodeURIComponent(snapshotId)}` : "";
   const query = useQuery<Interpretation>({ queryKey: ["signal-interpretation", symbol, timeframe, snapshotId], queryFn: () => getInterpretation(`/api/interpretation/${encodeURIComponent(symbol)}?timeframe=${timeframe}${snapshotQuery}`), enabled: Boolean(snapshotId), retry: false });
@@ -43,7 +45,15 @@ export function SignalInterpretation({ symbol, timeframe, snapshotId, onFocusDat
 
   const focus = (date?: string | null) => () => { if (date) onFocusDate(date); };
   const risks = [...data.conflicts, ...data.missing_conditions].slice(0, 2);
-  const detailSource = (id: string): SignalDetail["source"] => id === "delta" ? "DELTA" : id === "gpmapro" ? "GPMAPRO" : "GPMA2";
+  const detailSource = (id: string): SignalDetail["source"] | null => id === "delta" ? "DELTA" : id === "gpmapro" ? "GPMAPRO" : id === "gpma2" ? "GPMA2" : null;
+  const openDriver = (driver: Driver) => {
+    if (driver.detail_target === "NEWS_CENTER" || driver.id === "news") {
+      onOpenNews?.(symbol);
+      return;
+    }
+    const source = detailSource(driver.id);
+    if (source) setSelectedDetail(source);
+  };
   const currentDetails = selectedDetail ? data.signal_details.filter(item => item.source === selectedDetail) : [];
 
   return <section className={`decision-panel mt-4 ${actionClass[data.action]}`} aria-label="当前行动建议">
@@ -56,6 +66,7 @@ export function SignalInterpretation({ symbol, timeframe, snapshotId, onFocusDat
       <div className="decision-strength">
         <div className="decision-section-label"><span>行动强度</span><b>{data.action_strength} <small>/ 100</small></b></div>
         <div className="decision-progress" aria-label={`行动强度 ${data.action_strength} / 100`}><span style={{ width: `${data.action_strength}%` }}/></div>
+        <div className="decision-overlay-summary"><span>技术结论 {data.base_action_label}</span><b className={data.news_overlay.applied_points < 0 ? "is-negative" : data.news_overlay.applied_points > 0 ? "is-positive" : ""}>新闻调整 {data.news_overlay.applied_points > 0 ? "+" : ""}{data.news_overlay.applied_points.toFixed(2)}</b></div>
         <p>截至 {data.as_of} <i/> {data.rule_id}</p>
       </div>
       <div className="decision-next-step">
@@ -69,7 +80,7 @@ export function SignalInterpretation({ symbol, timeframe, snapshotId, onFocusDat
       <section aria-label="策略驱动"><div className="decision-area-heading"><div><p className="decision-kicker">策略驱动</p><h3>结论由这些条件共同约束</h3></div><span>{data.drivers.length} 项验证</span></div>
         <div className="decision-driver-grid">{data.drivers.map(driver => <article className={`decision-driver ${driverClass(driver.status)}`} key={driver.id}>
           <div className="decision-driver-heading"><span>{driver.title}</span><b>{driver.status}</b></div><p>{driver.detail}</p>
-          <div className="decision-driver-actions">{driver.date && <button type="button" onClick={focus(driver.date)}>定位 {driver.date}</button>}<button type="button" onClick={() => setSelectedDetail(detailSource(driver.id))}>查看详情</button></div>
+          <div className="decision-driver-actions">{driver.date && <button type="button" onClick={focus(driver.date)}>定位 {driver.date}</button>}<button type="button" onClick={() => openDriver(driver)}>{driver.id === "news" ? "新闻详情" : "查看详情"}</button></div>
         </article>)}</div>
       </section>
 

@@ -1,9 +1,26 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { ExternalLink, RefreshCw } from "lucide-react";
+import { ChevronDown, ExternalLink, RefreshCw } from "lucide-react";
 import { MarketCodeInput } from "@/components/MarketCodeInput";
-import { MetricCard, PageHeader } from "@/components/ui/workspace";
+import { PageHeader, StatusBadge } from "@/components/ui/workspace";
 import { resolveMarketCode, type Market } from "@/lib/marketCode";
+
+type Action = "BUY" | "ACCUMULATE" | "HOLD" | "REDUCE" | "SELL";
+type Bias = "BULLISH" | "NEUTRAL" | "BEARISH";
+type BadgeTone = "neutral" | "positive" | "warning" | "negative" | "info";
+
+type SourceHealth = {
+  source_id: string;
+  display_name: string;
+  scope: "COMPANY" | "MARKET";
+  collector: string;
+  status: "OK" | "DEGRADED" | "UNKNOWN";
+  availability: "AVAILABLE" | "UNAVAILABLE" | "NOT_CHECKED";
+  availability_reason: string | null;
+  last_success_at: string | null;
+  last_error: string | null;
+  consecutive_failures: number;
+};
 
 type NewsItem = {
   id: string;
@@ -11,18 +28,14 @@ type NewsItem = {
   title: string;
   url: string | null;
   source: string;
+  source_id?: string;
+  publisher?: string;
   published_at: string | null;
   summary: string | null;
-  publisher?: string;
   entity_status?: "ACCEPTED" | "REJECTED_ENTITY_MISMATCH";
   factor_eligible?: boolean;
   scope?: "COMPANY" | "MARKET";
 };
-
-type SourceHealth = { source_id: string; display_name: string; scope: "COMPANY" | "MARKET"; collector: string; status: "OK" | "DEGRADED" | "UNKNOWN"; availability: "AVAILABLE" | "UNAVAILABLE" | "NOT_CHECKED"; availability_reason: string | null; last_success_at: string | null; last_error: string | null; consecutive_failures: number };
-type Candidate = { symbol: string; tier: "FOCUS" | "WATCH" | "FILTERED"; research_state: "INSUFFICIENT_EVIDENCE" | "POSITIVE_WATCH" | "NEUTRAL" | "NEGATIVE_AVOID"; news_score: number; article_count: number; negative_catalyst: boolean; earliest_trade_at: string | null; validation_status: string; technical: { gpma_bullish: boolean; gpma_active_buy: boolean; delta_low_active: boolean }; evidence: Array<{ id: string; title: string; url: string | null; publisher: string; published_at: string; analysis: { direction: string; event_type: string } }> };
-type CandidateResponse = { status: string; snapshot_at?: string; candidates: Candidate[]; market_risk_filter?: { status: string; score: number; source_count: number }; message: string };
-type FactorEvaluation = { status: "VALIDATED" | "INSUFFICIENT_EVIDENCE"; sample_count: number; reason?: string; horizons: Array<{ horizon: number; status: string; sample_count: number; spearman_ic?: number; t_stat?: number; icir?: number; walk_forward?: { oos_sharpe_after_cost: number; test_count: number } }> };
 
 type NewsResponse = {
   symbol: string;
@@ -34,136 +47,589 @@ type NewsResponse = {
   fetched_at: string | null;
   is_cached: boolean;
   warning: string | null;
-  dropped_unapproved_sources?: string[];
-  source_warnings?: string[];
   source_health?: SourceHealth[];
 };
-type NewsSource = { source_id: string; display_name: string; authorization: string; enabled: boolean; kind: string; collector: string; scope: string };
-type CompanyResearch = {
-  symbol: string; coverage_status: "AVAILABLE" | "COVERAGE_GAP" | "SOURCE_UNAVAILABLE"; coverage_reason: string | null;
-  assessment: "POSITIVE" | "NEGATIVE" | "NEUTRAL" | "INSUFFICIENT"; sentiment_score: number | null; confidence: number; coverage_score: number; historical_prediction_confidence: number | null; validation_status: string;
-  supported_interpretation: string | null; unknowns: string[]; positive_catalysts: string[]; risk_items: string[];
-  event_timeline: Array<{ id: string; title: string; source: string; published_at: string | null; url: string | null; event_type: string; direction: string; method: string }>;
-  data_quality: { article_count: number; source_count: number; sources: string[]; earliest_published_at: string | null; latest_published_at: string | null; entity_match_count: number; source_status: string; fetched_at: string | null };
+
+type AdviceEvidence = {
+  id: string;
+  title: string;
+  url: string | null;
+  source?: string;
+  source_id?: string;
+  publisher?: string;
+  published_at: string | null;
+  earliest_trade_at: string | null;
+  summary?: string | null;
+  eligible: boolean;
+  exclusion_reason: string | null;
+  direction: string;
+  event_type: string;
+  method: string;
+  high_impact: boolean;
+  contribution: number;
 };
-type MarketRegime = { regime: "RISK_ON" | "NEUTRAL" | "CAUTION" | "RISK_OFF"; news_direction: string; news_score: number; confidence: number; coverage_score: number; cross_source_confirmation: number; themes: Array<{ event_type: string; article_count: number }>; uncertainty: string; volatility_validation: { status: "AVAILABLE" | "UNAVAILABLE"; active_alert_count: number; has_risk_alert: boolean } };
-type ResearchResponse = { company: CompanyResearch; market: MarketRegime; snapshot_id: string };
 
-async function fetchNews(code: string, refresh: boolean): Promise<NewsResponse> {
-  const params = new URLSearchParams({ limit: "20", refresh: String(refresh) });
-  const response = await fetch(`/api/news/${encodeURIComponent(code)}?${params}`);
-  if (!response.ok) throw new Error(await response.text());
-  return response.json();
-}
-
-async function fetchResearch(code: string, refresh: boolean): Promise<ResearchResponse> {
-  const response = await fetch(`/api/news/${encodeURIComponent(code)}/research?refresh=${refresh}`);
-  if (!response.ok) throw new Error(await response.text());
-  return response.json();
-}
-
-function formatTime(value: string | null) {
-  if (!value) return "发布时间未知";
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? value : new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(date);
-}
-
-const statusText: Record<NewsResponse["source_status"], string> = {
-  LIVE: "实时获取",
-  CACHED: "缓存数据",
-  STALE_CACHE: "历史缓存",
-  NO_DATA: "暂无新闻",
-  NO_COMPANY_NEWS: "暂无公司新闻",
-  COMPANY_UNAVAILABLE: "公司源不可用",
-  UNAVAILABLE: "数据源不可用",
-  DISABLED: "功能已关闭",
+type AdviceEvent = {
+  cluster_id: string;
+  title: string;
+  event_type: string;
+  direction: number;
+  high_impact: boolean;
+  source_count: number;
+  sources: string[];
+  published_at: string | null;
+  earliest_trade_at: string | null;
+  contribution: number;
+  evidence_ids: string[];
 };
-const assessmentText: Record<CompanyResearch["assessment"], string> = { POSITIVE: "偏正面", NEGATIVE: "偏负面", NEUTRAL: "中性", INSUFFICIENT: "证据不足" };
-const regimeText: Record<MarketRegime["regime"], string> = { RISK_ON: "风险偏好", NEUTRAL: "中性", CAUTION: "谨慎", RISK_OFF: "风险厌恶" };
 
-export function NewsCenter() {
-  const [symbol, setSymbol] = useState("AAPL");
-  const [market, setMarket] = useState<Market>("US");
-  const [refresh, setRefresh] = useState(false);
-  const [submitted, setSubmitted] = useState("US.AAPL");
-  const code = useMemo(() => { try { return resolveMarketCode(symbol, market); } catch { return ""; } }, [symbol, market]);
-  const query = useQuery<NewsResponse>({
-    queryKey: ["news", submitted, refresh],
-    queryFn: () => fetchNews(submitted, refresh),
-    enabled: Boolean(submitted),
-    retry: false,
-  });
-  const research = useQuery<ResearchResponse>({ queryKey: ["news-research", submitted, refresh], queryFn: () => fetchResearch(submitted, refresh), enabled: Boolean(submitted), retry: false });
-  const sources = useQuery<{ sources: NewsSource[] }>({ queryKey: ["news-sources"], queryFn: async () => { const response = await fetch("/api/news/sources"); if (!response.ok) throw new Error(await response.text()); return response.json(); }, retry: false });
-  const health = useQuery<{ sources: SourceHealth[] }>({ queryKey: ["news-health"], queryFn: async () => { const response = await fetch("/api/news/health"); if (!response.ok) throw new Error(await response.text()); return response.json(); }, retry: false, refetchInterval: 30_000 });
-  const candidates = useQuery<CandidateResponse>({ queryKey: ["news-factor-candidates"], queryFn: async () => { const response = await fetch("/api/news/factor/candidates"); if (!response.ok) throw new Error(await response.text()); return response.json(); }, retry: false });
-  const evaluation = useQuery<FactorEvaluation>({ queryKey: ["news-factor-evaluation"], queryFn: async () => { const response = await fetch("/api/news/factor/evaluation"); if (!response.ok) throw new Error(await response.text()); return response.json(); }, retry: false });
-  const [syncing, setSyncing] = useState(false);
-  const buildSnapshot = async () => { setSyncing(true); try { const response = await fetch("/api/news/factor/snapshot?refresh=true", { method: "POST" }); if (!response.ok) throw new Error(await response.text()); await Promise.all([candidates.refetch(), evaluation.refetch(), health.refetch()]); } finally { setSyncing(false); } };
-  const load = (force = false) => {
-    if (!code) return;
-    setRefresh(force);
-    setSubmitted(code);
-    if (code === submitted && force === refresh) void query.refetch();
+type MarketRegime = {
+  regime: "RISK_ON" | "NEUTRAL" | "CAUTION" | "RISK_OFF";
+  news_direction: string;
+  news_score: number;
+  confidence: number;
+  coverage_score: number;
+  cross_source_confirmation: number;
+  themes: Array<{ event_type: string; article_count: number }>;
+  uncertainty: string;
+  volatility_validation: { status: string; active_alert_count: number; has_risk_alert: boolean };
+};
+
+type NewsAdvice = {
+  symbol: string;
+  as_of: string;
+  factor_version: string;
+  status: "AVAILABLE" | "INSUFFICIENT_EVIDENCE" | "STALE" | "UNAVAILABLE";
+  action: Action;
+  action_label: string;
+  position_guidance: string;
+  bias: Bias;
+  score: number;
+  confidence: number;
+  validation_status: string;
+  validation: FactorEvaluation;
+  concise_reason: string;
+  components: Record<string, number>;
+  market_regime: MarketRegime;
+  contribution: { enabled: boolean; positive_cap: number; negative_cap: number; points: number; effect: string };
+  key_reasons: string[];
+  risk_flags: string[];
+  events: AdviceEvent[];
+  evidence: AdviceEvidence[];
+  data_quality: {
+    article_count: number;
+    valid_article_count: number;
+    unique_event_count: number;
+    duplicate_count: number;
+    source_count: number;
+    published_at_completeness: number;
+    model_eligibility_rate: number;
+    model_status: string;
+    coverage_gaps: string[];
+    source_status: string;
+    fetched_at: string | null;
+    is_cached: boolean;
+    stale: boolean;
+    warning?: string | null;
   };
-  const data = query.data;
-  const company = research.data?.company;
-  const marketRegime = research.data?.market;
+  earliest_trade_at: string | null;
+  expires_at: string | null;
+};
 
-  return <div className="terminal-page">
-    <PageHeader
-      title="新闻中心"
-      description="只读新闻证据：公司新闻与市场新闻分开保存；只保留来源、标题、时间和原文链接。"
-      actions={<form className="flex gap-2" onSubmit={event => { event.preventDefault(); load(false); }}>
-        <MarketCodeInput market={market} value={symbol} onMarketChange={setMarket} onValueChange={setSymbol} className="w-28" />
-        <button className="secondary-button" type="submit" disabled={!code || query.isFetching}>查询</button>
-        <button className="primary-button flex items-center gap-1" type="button" onClick={() => load(true)} disabled={!code || query.isFetching}><RefreshCw size={14} className={query.isFetching ? "animate-spin" : ""} />刷新新闻</button>
-      </form>}
-    />
-    {query.isError && <p className="error-banner">{query.error instanceof Error ? query.error.message : "新闻查询失败。"}</p>}
-    <section className="panel p-4">
-      <div className="news-summary-grid">
-        <MetricCard label="终端代码" value={data?.symbol ?? submitted} />
-        <MetricCard label="新闻代码" value={data?.provider_symbol ?? "—"} />
-        <MetricCard label="数据状态" value={data ? statusText[data.source_status] : query.isFetching ? "加载中…" : "—"} tone={data?.source_status === "LIVE" || data?.source_status === "CACHED" ? "positive" : data?.source_status === "UNAVAILABLE" ? "negative" : "warning"} />
-        <MetricCard label="更新时间" value={formatTime(data?.fetched_at ?? null)} />
+type Candidate = {
+  symbol: string;
+  tier: "FOCUS" | "WATCH" | "FILTERED";
+  research_state: string;
+  news_score: number;
+  article_count: number;
+  negative_catalyst: boolean;
+  earliest_trade_at: string | null;
+  validation_status: string;
+};
+
+type CandidateResponse = {
+  status: string;
+  snapshot_at?: string;
+  validation_status?: string;
+  snapshot_quality?: string;
+  candidates: Candidate[];
+  message: string;
+};
+
+type FactorEvaluation = {
+  status: "VALIDATED" | "INSUFFICIENT_EVIDENCE";
+  factor_version?: string;
+  sample_count: number;
+  session_count?: number;
+  reason?: string;
+  horizons: Array<{
+    horizon: number;
+    status: string;
+    sample_count: number;
+    spearman_ic?: number;
+    t_stat?: number;
+    icir?: number;
+    walk_forward?: { oos_sharpe_after_cost: number; test_count: number };
+  }>;
+};
+
+type NewsSource = {
+  source_id: string;
+  display_name: string;
+  authorization: string;
+  enabled: boolean;
+  kind: string;
+  collector: string;
+  scope: string;
+};
+
+type Props = {
+  initialCode?: string;
+  initialDetailsOpen?: boolean;
+  contextKey?: number;
+};
+
+const componentMeta: Record<string, { label: string; weight: string }> = {
+  short_term_sentiment: { label: "24 小时情绪", weight: "40%" },
+  weekly_sentiment: { label: "7 日情绪", weight: "25%" },
+  major_event_impact: { label: "重大事件", weight: "15%" },
+  directional_breadth: { label: "方向广度", weight: "10%" },
+  attention_surprise: { label: "异常关注度", weight: "10%" },
+  negative_tail_risk: { label: "重大负面尾部", weight: "扣减 25%" },
+};
+
+async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(path, init);
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(detail || `请求失败 (${response.status})`);
+  }
+  return response.json();
+}
+
+function actionClass(action: Action) {
+  return `news-action-${action.toLowerCase()}`;
+}
+
+function actionEnglish(action: Action) {
+  return { BUY: "BUY", ACCUMULATE: "ACCUMULATE", HOLD: "HOLD", REDUCE: "REDUCE", SELL: "SELL" }[action];
+}
+
+function biasText(bias: Bias) {
+  return { BULLISH: "偏多", NEUTRAL: "中性", BEARISH: "偏空" }[bias];
+}
+
+function regimeText(regime?: MarketRegime["regime"]) {
+  return { RISK_ON: "风险偏好", NEUTRAL: "中性", CAUTION: "谨慎", RISK_OFF: "风险厌恶" }[regime ?? "NEUTRAL"];
+}
+
+function adviceStatusText(status: NewsAdvice["status"]) {
+  return { AVAILABLE: "可用", INSUFFICIENT_EVIDENCE: "证据不足", STALE: "缓存过期", UNAVAILABLE: "不可用" }[status];
+}
+
+function toneForDirection(direction: string | number): BadgeTone {
+  const numeric = typeof direction === "number" ? direction : direction === "POSITIVE" ? 1 : direction === "NEGATIVE" ? -1 : 0;
+  return numeric > 0.14 ? "positive" : numeric < -0.14 ? "negative" : "neutral";
+}
+
+function formatTime(value?: string | null) {
+  if (!value) return "暂无";
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString("zh-CN", { hour12: false });
+}
+
+function signed(value: number, digits = 2) {
+  const normalized = Math.abs(value) < 0.0005 ? 0 : value;
+  return `${normalized > 0 ? "+" : ""}${normalized.toFixed(digits)}`;
+}
+
+function initialMarket(code: string): Market {
+  if (code.toUpperCase().startsWith("HK.")) return "HK";
+  if (code.toUpperCase().startsWith("SH.") || code.toUpperCase().startsWith("SZ.")) return "A";
+  return "US";
+}
+
+function initialTicker(code: string) {
+  return code.includes(".") ? code.split(".").slice(1).join(".") : code;
+}
+
+function NewsList({ title, caption, items }: { title: string; caption: string; items: NewsItem[] }) {
+  return (
+    <section className="panel news-stream-panel">
+      <div className="news-section-heading">
+        <div>
+          <span className="news-eyebrow">EVIDENCE STREAM</span>
+          <h2>{title}</h2>
+        </div>
+        <span>{caption}</span>
       </div>
-      {data?.warning && <p className="news-warning">{data.warning}</p>}
-      {data?.source_warnings?.map(warning => <p key={warning} className="news-warning">{warning}</p>)}
-      {data?.dropped_unapproved_sources?.length ? <p className="news-warning">未纳入情绪/建议的非白名单来源：{data.dropped_unapproved_sources.join("、")}</p> : null}
+      {items.length ? (
+        <div className="news-compact-list">
+          {items.slice(0, 10).map((item) => (
+            <article className="news-compact-item" key={`${item.id}-${item.published_at}`}>
+              <div className="news-compact-meta">
+                <span>{item.publisher || item.source}</span>
+                <time>{formatTime(item.published_at)}</time>
+              </div>
+              <h3>
+                {item.url ? (
+                  <a href={item.url} target="_blank" rel="noreferrer">
+                    {item.title}<ExternalLink size={13} aria-hidden="true" />
+                  </a>
+                ) : item.title}
+              </h3>
+              {item.summary && <p>{item.summary}</p>}
+            </article>
+          ))}
+        </div>
+      ) : (
+        <div className="news-empty-state">
+          <strong>当前窗口没有可展示的新闻</strong>
+          <span>新闻缺失不会被解释为中性信号，总览贡献保持为 0。</span>
+        </div>
+      )}
     </section>
-    {research.isError && <p className="error-banner">研究卡片加载失败：{research.error instanceof Error ? research.error.message : "请稍后重试。"}</p>}
-    <section className="panel mt-4 p-4">
-      <div className="panel-title">公司研究卡片 <span className="float-right text-xs font-normal text-zinc-500">标题级可追溯证据，不构成交易建议</span></div>
-      {!company ? <p className="muted mt-3">正在整理公司新闻研究证据…</p> : <>
-        <div className="mt-3 grid grid-cols-4 gap-3 text-sm"><div><span>覆盖状态</span><b className={company.coverage_status === "AVAILABLE" ? "text-emerald-300" : "text-amber-300"}>{company.coverage_status === "AVAILABLE" ? "已覆盖" : company.coverage_status === "COVERAGE_GAP" ? "公司源覆盖不足" : "公司源不可用"}</b></div><div><span>新闻判断</span><b>{assessmentText[company.assessment]}</b></div><div><span>数据覆盖度</span><b>{(company.coverage_score * 100).toFixed(0)}%</b></div><div><span>历史预测可信度</span><b className="text-amber-300">尚未验证</b></div></div>
-        {company.coverage_reason && <p className="news-warning">{company.coverage_reason}</p>}
-        {company.supported_interpretation && <p className="mt-3 text-sm text-zinc-300">{company.supported_interpretation}</p>}
-        {!!company.event_timeline.length && <div className="mt-3 space-y-2">{company.event_timeline.slice(0, 5).map(item => <div className="border-l-2 border-cyan-700 pl-3 text-sm" key={item.id}><span className="text-cyan-200">{item.event_type} · {item.direction} · {item.method}</span><span className="ml-2 text-zinc-500">{formatTime(item.published_at)}</span><div>{item.url ? <a className="text-zinc-200 hover:text-cyan-300" href={item.url} target="_blank" rel="noreferrer">{item.title}</a> : item.title}</div></div>)}</div>}
-        <p className="mt-3 text-xs text-zinc-500">待核实：{company.unknowns.join("；")}</p>
-      </>}
-    </section>
-    <section className="panel mt-4 p-4">
-      <div className="panel-title">美股市场风向 <span className="float-right text-xs font-normal text-zinc-500">新闻风险背景，不预测涨跌</span></div>
-      {!marketRegime ? <p className="muted mt-3">正在汇总宏观新闻与波动率验证…</p> : <><div className="mt-3 grid grid-cols-4 gap-3 text-sm"><div><span>当前状态</span><b className={marketRegime.regime === "RISK_OFF" ? "text-rose-300" : marketRegime.regime === "RISK_ON" ? "text-emerald-300" : marketRegime.regime === "CAUTION" ? "text-amber-300" : ""}>{regimeText[marketRegime.regime]}</b></div><div><span>新闻方向</span><b>{marketRegime.news_direction}</b></div><div><span>跨源确认</span><b>{marketRegime.cross_source_confirmation} 个来源</b></div><div><span>证据覆盖度</span><b>{(marketRegime.coverage_score * 100).toFixed(0)}%</b></div></div><p className="mt-3 text-sm text-zinc-300">主题：{marketRegime.themes.length ? marketRegime.themes.map(item => `${item.event_type} ${item.article_count}`).join(" · ") : "暂无可分类宏观主题"}</p><p className="mt-2 text-xs text-zinc-500">波动率验证：{marketRegime.volatility_validation.status === "AVAILABLE" ? `${marketRegime.volatility_validation.active_alert_count} 个活跃预警` : "尚未完成"}；{marketRegime.uncertainty}</p></>}
-    </section>
-    <section className="panel mt-4 p-4"><div className="panel-title">来源健康状态</div><div className="mt-3 grid grid-cols-2 gap-2 text-xs">{(data?.source_health ?? health.data?.sources ?? []).map(source => <div className="border border-zinc-800 p-2" key={source.source_id}><b>{source.display_name}</b><span className={source.availability === "AVAILABLE" ? "ml-2 text-emerald-300" : source.availability === "UNAVAILABLE" ? "ml-2 text-amber-300" : "ml-2 text-zinc-500"}>{source.availability === "AVAILABLE" ? "可用" : source.availability === "UNAVAILABLE" ? "不可用" : "未检查"}</span><p className="mt-1 text-zinc-500">{source.scope === "COMPANY" ? "公司新闻" : "宏观新闻"} · {source.collector}</p>{source.availability_reason && <p className="mt-1 text-amber-300">原因：{source.availability_reason}</p>}<p className="mt-1 text-zinc-500">最近成功：{formatTime(source.last_success_at)}</p></div>)}</div></section>
-    <section className="panel mt-4 p-4"><div className="panel-title">新闻来源白名单</div><div className="source-grid">{sources.data?.sources.map(source => <div key={source.source_id}><b>{source.display_name}</b><span>{source.enabled ? `${source.collector === "RSS" ? "已配置 RSS" : "已接入"} · ${source.scope === "MARKET" ? "市场新闻" : "公司新闻"}` : source.authorization === "LICENSE_REQUIRED" ? "需授权" : "待配置 RSS/API"}</span></div>)}</div></section>
-    <section className="panel mt-4 overflow-hidden">
-      <div className="news-list-title"><span>公司新闻</span><span>{data?.company_items.length ?? 0} 条</span></div>
-      {query.isLoading ? <p className="muted p-4">正在获取公司新闻…</p> : !data?.company_items.length ? <p className="muted p-4">未找到 {data?.provider_symbol ?? submitted} 的可验证公司新闻。宏观 RSS 不会作为该标的新闻展示。</p> : <div className="news-list">
-        {data.company_items.map(item => <article className="news-item" key={item.id}>
-          <div className="news-item-meta"><span>{item.publisher ?? "未知发布者"} · {item.source} · 公司匹配</span><span>{formatTime(item.published_at)}</span></div>
-          <div className="news-item-title">{item.url ? <a href={item.url} target="_blank" rel="noreferrer">{item.title}<ExternalLink size={13} /></a> : item.title}</div>
-          {item.summary && <p>{item.summary}</p>}
-        </article>)}
-      </div>}
-    </section>
-    <section className="panel mt-4 overflow-hidden">
-      <div className="news-list-title"><span>宏观新闻</span><span>{data?.market_items.length ?? 0} 条</span></div>
-      {query.isLoading ? <p className="muted p-4">正在获取宏观新闻…</p> : !data?.market_items.length ? <p className="muted p-4">暂无可展示的宏观新闻。</p> : <div className="news-list">{data.market_items.map(item => <article className="news-item" key={item.id}><div className="news-item-meta"><span>{item.source} · 宏观</span><span>{formatTime(item.published_at)}</span></div><div className="news-item-title">{item.url ? <a href={item.url} target="_blank" rel="noreferrer">{item.title}<ExternalLink size={13} /></a> : item.title}</div></article>)}</div>}
-    </section>
-    <section className="panel mt-4 p-4"><div className="panel-title">因子样本外验证</div><p className={evaluation.data?.status === "VALIDATED" ? "mt-3 text-emerald-300" : "mt-3 text-amber-300"}>{evaluation.data?.status === "VALIDATED" ? "已通过预设统计门槛" : "尚未验证：证据不足"}</p><p className="mt-2 text-xs text-zinc-500">{evaluation.data?.reason ?? `可对齐样本 ${evaluation.data?.sample_count ?? 0} 条；仅通过后才允许 POSITIVE_WATCH / NEUTRAL / NEGATIVE_AVOID。`}</p>{evaluation.data?.horizons.map(item => <p className="mt-2 text-xs" key={item.horizon}>{item.horizon} 日：IC {item.spearman_ic?.toFixed(3) ?? "—"} · t {item.t_stat?.toFixed(2) ?? "—"} · ICIR {item.icir?.toFixed(2) ?? "—"} · 样本 {item.sample_count}</p>)}</section>
-    <section className="panel mt-4 overflow-hidden"><div className="news-list-title"><span>新闻研究候选 <small className="text-zinc-500">不构成交易建议</small></span><button className="secondary-button" disabled={syncing} onClick={() => void buildSnapshot()}>{syncing ? "生成中…" : "生成因子快照"}</button></div>{candidates.data?.status === "NO_SNAPSHOT" ? <p className="muted p-4">{candidates.data.message}</p> : <div className="news-list">{candidates.data?.candidates.map(candidate => <article className="news-item" key={candidate.symbol}><div className="news-item-meta"><span>{candidate.symbol} · {candidate.research_state === "INSUFFICIENT_EVIDENCE" ? "证据不足" : candidate.research_state}</span><span>等权基准分 {candidate.news_score.toFixed(3)} · {candidate.article_count} 篇</span></div><div className="news-item-title">GPMA {candidate.technical.gpma_bullish && candidate.technical.gpma_active_buy ? "多头 B 信号" : "未确认"} · DELTA {candidate.technical.delta_low_active ? "低点窗口" : "未确认"}</div><p>最早研究交易时间：{candidate.earliest_trade_at ?? "无合格新闻"}</p>{candidate.evidence.slice(0, 2).map(item => <p key={item.id}>{item.publisher}｜{item.title}</p>)}</article>)}</div>}</section>
-  </div>;
+  );
+}
+
+export function NewsCenter({ initialCode = "US.AAPL", initialDetailsOpen = false, contextKey = 0 }: Props) {
+  const [market, setMarket] = useState<Market>(() => initialMarket(initialCode));
+  const [ticker, setTicker] = useState(() => initialTicker(initialCode));
+  const [code, setCode] = useState(initialCode.toUpperCase());
+  const [refresh, setRefresh] = useState(false);
+  const [detailsOpen, setDetailsOpen] = useState(initialDetailsOpen);
+  const [inputError, setInputError] = useState<string | null>(null);
+  const [snapshotBusy, setSnapshotBusy] = useState(false);
+  const [snapshotError, setSnapshotError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const nextCode = initialCode.toUpperCase();
+    setMarket(initialMarket(nextCode));
+    setTicker(initialTicker(nextCode));
+    setCode(nextCode);
+    setDetailsOpen(initialDetailsOpen);
+  }, [contextKey, initialCode, initialDetailsOpen]);
+
+  const adviceQuery = useQuery({
+    queryKey: ["news-advice", code, refresh],
+    queryFn: () => fetchJson<NewsAdvice>(`/api/news/${encodeURIComponent(code)}/advice?refresh=${refresh}`),
+    retry: 1,
+  });
+  const newsQuery = useQuery({
+    queryKey: ["news", code, refresh],
+    queryFn: () => fetchJson<NewsResponse>(`/api/news/${encodeURIComponent(code)}?limit=30&refresh=${refresh}`),
+    retry: 1,
+  });
+  const sourceQuery = useQuery({ queryKey: ["news-sources"], queryFn: () => fetchJson<{ sources: NewsSource[] }>("/api/news/sources") });
+  const healthQuery = useQuery({ queryKey: ["news-health"], queryFn: () => fetchJson<{ sources: SourceHealth[] }>("/api/news/health") });
+  const candidateQuery = useQuery({ queryKey: ["news-candidates"], queryFn: () => fetchJson<CandidateResponse>("/api/news/factor/candidates?limit=8") });
+  const evaluationQuery = useQuery({ queryKey: ["news-evaluation"], queryFn: () => fetchJson<FactorEvaluation>("/api/news/factor/evaluation") });
+
+  const runQuery = (force = false) => {
+    try {
+      const nextCode = resolveMarketCode(ticker, market);
+      setInputError(null);
+      if (nextCode === code && force === refresh) {
+        void Promise.all([adviceQuery.refetch(), newsQuery.refetch()]);
+      } else {
+        setCode(nextCode);
+        setRefresh(force);
+      }
+    } catch (error) {
+      setInputError(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const buildSnapshot = async () => {
+    setSnapshotBusy(true);
+    setSnapshotError(null);
+    try {
+      await fetchJson("/api/news/factor/snapshot?refresh=true", { method: "POST" });
+      await Promise.all([candidateQuery.refetch(), evaluationQuery.refetch()]);
+    } catch (error) {
+      setSnapshotError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setSnapshotBusy(false);
+    }
+  };
+
+  const fallbackAdvice = useMemo<NewsAdvice>(() => ({
+    symbol: code,
+    as_of: new Date().toISOString(),
+    factor_version: "NEWS_FACTOR_V3",
+    status: "UNAVAILABLE",
+    action: "HOLD",
+    action_label: "观望",
+    position_guidance: "维持现有仓位，不依据新闻执行交易。",
+    bias: "NEUTRAL",
+    score: 0,
+    confidence: 0,
+    validation_status: "INSUFFICIENT_EVIDENCE",
+    validation: { status: "INSUFFICIENT_EVIDENCE", sample_count: 0, horizons: [] },
+    concise_reason: "新闻建议暂时不可用，保持观望且不参与总览决策。",
+    components: {},
+    market_regime: { regime: "NEUTRAL", news_direction: "NEUTRAL", news_score: 0, confidence: 0, coverage_score: 0, cross_source_confirmation: 0, themes: [], uncertainty: "新闻风险背景暂时不可用。", volatility_validation: { status: "UNAVAILABLE", active_alert_count: 0, has_risk_alert: false } },
+    contribution: { enabled: false, positive_cap: 5, negative_cap: 15, points: 0, effect: "NONE" },
+    key_reasons: [],
+    risk_flags: ["新闻接口不可用，本次总览贡献为 0。"],
+    events: [],
+    evidence: [],
+    data_quality: { article_count: 0, valid_article_count: 0, unique_event_count: 0, duplicate_count: 0, source_count: 0, published_at_completeness: 0, model_eligibility_rate: 0, model_status: "UNAVAILABLE", coverage_gaps: [], source_status: "UNAVAILABLE", fetched_at: null, is_cached: false, stale: true },
+    earliest_trade_at: null,
+    expires_at: null,
+  }), [code]);
+
+  const advice = adviceQuery.data ?? fallbackAdvice;
+  const news = newsQuery.data;
+  const evaluation = evaluationQuery.data ?? advice.validation;
+  const heroError = inputError || (adviceQuery.error instanceof Error ? adviceQuery.error.message : null);
+  const validationTone: BadgeTone = advice.validation_status === "VALIDATED" ? "positive" : "warning";
+  const sourceTone: BadgeTone = advice.status === "AVAILABLE" ? "positive" : advice.status === "STALE" ? "warning" : "negative";
+
+  return (
+    <div className="terminal-page news-decision-page">
+      <PageHeader
+        title="新闻中心"
+        description="先看新闻建议，再按需核对因子、事件与原始证据。新闻仅用于研究辅助，不构成交易指令。"
+        actions={(
+          <form className="news-query-form" onSubmit={(event) => { event.preventDefault(); runQuery(false); }}>
+            <MarketCodeInput market={market} value={ticker} onMarketChange={setMarket} onValueChange={setTicker} className="news-code-input" />
+            <button className="secondary-button" type="submit">查询</button>
+            <button className="primary-button news-refresh-button" type="button" onClick={() => runQuery(true)} disabled={adviceQuery.isFetching || newsQuery.isFetching}>
+              <RefreshCw size={15} aria-hidden="true" />
+              刷新新闻
+            </button>
+          </form>
+        )}
+      />
+
+      {adviceQuery.isLoading ? (
+        <section className="news-advice-skeleton" aria-label="正在加载新闻建议">
+          <div /><div /><div />
+        </section>
+      ) : (
+        <section className={`news-advice-hero ${actionClass(advice.action)}`}>
+          <div className="news-advice-primary">
+            <div className="news-advice-kicker">
+              <span>NEWS ADVICE</span>
+              <StatusBadge tone={validationTone}>{advice.validation_status === "VALIDATED" ? "已验证" : "证据不足"}</StatusBadge>
+            </div>
+            <div className="news-action-line">
+              <h2>{advice.action_label}</h2>
+              <span>{actionEnglish(advice.action)}</span>
+            </div>
+            <p className="news-position-guidance">{advice.position_guidance}</p>
+            <p className="news-concise-reason">{advice.concise_reason}</p>
+            {heroError && <div className="news-inline-error" role="alert">{heroError}</div>}
+          </div>
+
+          <div className="news-advice-metrics">
+            <article>
+              <span>新闻偏向</span>
+              <strong>{biasText(advice.bias)}</strong>
+              <small>因子分数 {signed(advice.score)}</small>
+            </article>
+            <article>
+              <span>24 小时方向</span>
+              <strong>{signed(advice.components.short_term_sentiment ?? 0)}</strong>
+              <small>短期权重 40%</small>
+            </article>
+            <article>
+              <span>7 日方向</span>
+              <strong>{signed(advice.components.weekly_sentiment ?? 0)}</strong>
+              <small>周度权重 25%</small>
+            </article>
+            <article>
+              <span>可信度</span>
+              <strong>{Math.round(advice.confidence * 100)}%</strong>
+              <small>{advice.data_quality.unique_event_count} 个独立事件簇</small>
+            </article>
+          </div>
+
+          <aside className="news-advice-side">
+            <div>
+              <span>总览新闻调整</span>
+              <strong>{signed(advice.contribution.points, 1)} 分</strong>
+              <small>正面上限 +5，负面下限 -15</small>
+            </div>
+            <dl>
+              <div><dt>市场环境</dt><dd>{regimeText(advice.market_regime.regime)}</dd></div>
+              <div><dt>数据状态</dt><dd><StatusBadge tone={sourceTone}>{adviceStatusText(advice.status)}</StatusBadge></dd></div>
+              <div><dt>数据时间</dt><dd>{formatTime(advice.data_quality.fetched_at)}</dd></div>
+            </dl>
+            <button className="news-detail-toggle" type="button" onClick={() => setDetailsOpen((value) => !value)} aria-expanded={detailsOpen}>
+              {detailsOpen ? "收起详细分析" : "查看详细分析"}
+              <ChevronDown size={16} aria-hidden="true" />
+            </button>
+          </aside>
+        </section>
+      )}
+
+      {detailsOpen && (
+        <section className="news-analysis-detail" aria-label="新闻详细分析">
+          <div className="news-section-heading news-analysis-heading">
+            <div>
+              <span className="news-eyebrow">FACTOR EXPLAINABILITY</span>
+              <h2>详细分析</h2>
+            </div>
+            <span>{advice.factor_version} · 截至 {formatTime(advice.as_of)}</span>
+          </div>
+
+          <div className="news-analysis-grid">
+            <div className="news-factor-breakdown">
+              <h3>因子分解</h3>
+              <p>各项为去重事件簇经过相关度、来源质量和时间衰减后的方向值。</p>
+              <div className="news-component-grid">
+                {Object.entries(componentMeta).map(([key, meta]) => {
+                  const value = advice.components[key] ?? 0;
+                  return (
+                    <article className={`news-component-card tone-${toneForDirection(key === "negative_tail_risk" ? -value : value)}`} key={key}>
+                      <div><span>{meta.label}</span><small>{meta.weight}</small></div>
+                      <strong>{signed(value)}</strong>
+                    </article>
+                  );
+                })}
+              </div>
+            </div>
+
+            <aside className="news-risk-context">
+              <h3>风险与行动约束</h3>
+              <div className="news-context-row">
+                <span>市场新闻环境</span>
+                <StatusBadge tone={advice.market_regime.regime === "RISK_OFF" ? "negative" : advice.market_regime.regime === "CAUTION" ? "warning" : "neutral"}>{regimeText(advice.market_regime.regime)}</StatusBadge>
+              </div>
+              <p>{advice.market_regime.uncertainty}</p>
+              <ul>
+                {(advice.risk_flags.length ? advice.risk_flags : ["当前未识别额外风险否决项。"] ).map((item) => <li key={item}>{item}</li>)}
+              </ul>
+              <dl>
+                <div><dt>最早可行动时间</dt><dd>{formatTime(advice.earliest_trade_at)}</dd></div>
+                <div><dt>本次数据到期</dt><dd>{formatTime(advice.expires_at)}</dd></div>
+              </dl>
+            </aside>
+          </div>
+
+          <div className="news-event-section">
+            <div className="news-subheading">
+              <h3>关键事件簇</h3>
+              <span>同一事件的转载只提升跨源可信度，不重复增加方向分</span>
+            </div>
+            {advice.events.length ? (
+              <div className="news-event-grid">
+                {advice.events.map((event) => (
+                  <article className={`news-event-card border-${toneForDirection(event.direction)}`} key={event.cluster_id}>
+                    <div className="news-event-meta">
+                      <StatusBadge tone={toneForDirection(event.direction)}>{event.event_type}</StatusBadge>
+                      {event.high_impact && <StatusBadge tone="warning">重大事件</StatusBadge>}
+                    </div>
+                    <h4>{event.title}</h4>
+                    <p>{event.source_count} 个独立来源 · 贡献 {signed(event.contribution)}</p>
+                    <dl>
+                      <div><dt>发布时间</dt><dd>{formatTime(event.published_at)}</dd></div>
+                      <div><dt>最早可行动</dt><dd>{formatTime(event.earliest_trade_at)}</dd></div>
+                    </dl>
+                  </article>
+                ))}
+              </div>
+            ) : (
+              <div className="news-empty-state compact"><strong>没有合格的方向性事件簇</strong><span>通用 SEC 标题、规则回退或缺少时序信息的新闻只作为关注度证据。</span></div>
+            )}
+          </div>
+
+          <div className="news-evidence-section">
+            <div className="news-subheading">
+              <h3>原始证据</h3>
+              <span>保留来源、发布时间、模型方法和排除原因</span>
+            </div>
+            {advice.evidence.length ? (
+              <div className="news-evidence-list">
+                {advice.evidence.map((item) => (
+                  <article key={`${item.id}-${item.published_at}`}>
+                    <div className="news-evidence-state">
+                      <StatusBadge tone={item.eligible ? toneForDirection(item.direction) : "neutral"}>{item.eligible ? item.direction : "未计分"}</StatusBadge>
+                      <span>{item.method} · {item.event_type}</span>
+                    </div>
+                    <div className="news-evidence-copy">
+                      <h4>{item.title}</h4>
+                      <p>{item.publisher || item.source_id || item.source} · {formatTime(item.published_at)}</p>
+                      {item.exclusion_reason && <small>{item.exclusion_reason}</small>}
+                    </div>
+                    {item.url ? <a href={item.url} target="_blank" rel="noreferrer" aria-label={`打开原文：${item.title}`}><ExternalLink size={15} /></a> : <span className="news-no-link">无链接</span>}
+                  </article>
+                ))}
+              </div>
+            ) : (
+              <div className="news-empty-state compact"><strong>暂无原始证据</strong><span>系统不会在没有合格证据时生成方向性交易结论。</span></div>
+            )}
+          </div>
+        </section>
+      )}
+
+      {newsQuery.error && <div className="error-banner news-page-error" role="alert">新闻列表加载失败：{newsQuery.error instanceof Error ? newsQuery.error.message : "未知错误"}</div>}
+      {news?.warning && <div className="news-warning">{news.warning}</div>}
+
+      <div className="news-stream-grid">
+        <NewsList title="公司新闻" caption={`${news?.company_items.length ?? 0} 条近期证据`} items={news?.company_items ?? []} />
+        <NewsList title="市场风险背景" caption="不直接混入公司方向分" items={news?.market_items ?? []} />
+      </div>
+
+      <details className="news-diagnostics" open={false}>
+        <summary>
+          <div><span className="news-eyebrow">RESEARCH PIPELINE</span><strong>候选观察与数据模型状态</strong></div>
+          <span>次级信息 · 点击展开</span>
+        </summary>
+        <div className="news-diagnostics-content">
+          <section className="news-candidate-section">
+            <div className="news-subheading">
+              <div><h3>新闻因子候选观察</h3><span>{candidateQuery.data?.message || "需先生成当日快照"}</span></div>
+              <button className="secondary-button" type="button" onClick={buildSnapshot} disabled={snapshotBusy}>{snapshotBusy ? "生成中" : "生成当日快照"}</button>
+            </div>
+            {snapshotError && <div className="news-inline-error" role="alert">{snapshotError}</div>}
+            <div className="news-candidate-grid">
+              {(candidateQuery.data?.candidates ?? []).map((candidate) => (
+                <article key={candidate.symbol}>
+                  <div><strong>{candidate.symbol}</strong><StatusBadge tone={candidate.tier === "FOCUS" ? "positive" : candidate.tier === "WATCH" ? "info" : "neutral"}>{candidate.tier}</StatusBadge></div>
+                  <p>{candidate.research_state}</p>
+                  <dl><div><dt>因子分数</dt><dd>{signed(candidate.news_score)}</dd></div><div><dt>文章数</dt><dd>{candidate.article_count}</dd></div></dl>
+                </article>
+              ))}
+              {!candidateQuery.isLoading && !(candidateQuery.data?.candidates.length) && <div className="news-empty-state compact"><strong>暂无候选快照</strong><span>生成快照后仍需通过样本外验证，才可能产生行动标签。</span></div>}
+            </div>
+          </section>
+
+          <section className="news-model-status">
+            <div className="news-subheading"><h3>样本外验证</h3><StatusBadge tone={evaluation?.status === "VALIDATED" ? "positive" : "warning"}>{evaluation?.status || "检查中"}</StatusBadge></div>
+            <p>{evaluation?.reason || "三个预测周期必须同时通过预设统计门槛。"}</p>
+            <div className="news-validation-grid">
+              {(evaluation?.horizons ?? []).map((item) => (
+                <article key={item.horizon}>
+                  <span>{item.horizon} 日超额收益</span>
+                  <strong>{item.status}</strong>
+                  <small>IC {item.spearman_ic?.toFixed(3) ?? "暂无"} · t {item.t_stat?.toFixed(2) ?? "暂无"} · OOS {item.walk_forward?.oos_sharpe_after_cost?.toFixed(2) ?? "暂无"}</small>
+                </article>
+              ))}
+              {!(evaluation?.horizons.length) && <div className="news-empty-state compact"><strong>验证样本尚未形成</strong><span>当前建议固定为观望，总览新闻权重为 0。</span></div>}
+            </div>
+          </section>
+
+          <section className="news-source-status">
+            <div className="news-subheading"><h3>来源健康与白名单</h3><span>{healthQuery.data?.sources.filter((item) => item.availability === "AVAILABLE").length ?? 0} 个来源可用</span></div>
+            <div className="news-source-grid">
+              {(sourceQuery.data?.sources ?? []).map((source) => {
+                const health = healthQuery.data?.sources.find((item) => item.source_id === source.source_id);
+                const available = health?.availability === "AVAILABLE";
+                return (
+                  <article key={source.source_id}>
+                    <div><strong>{source.display_name}</strong><StatusBadge tone={available ? "positive" : health?.availability === "UNAVAILABLE" ? "negative" : "neutral"}>{health?.availability || "NOT_CHECKED"}</StatusBadge></div>
+                    <p>{source.scope} · {source.collector} · {source.authorization}</p>
+                    <small>{health?.last_error || health?.availability_reason || `最近成功：${formatTime(health?.last_success_at)}`}</small>
+                  </article>
+                );
+              })}
+            </div>
+          </section>
+        </div>
+      </details>
+    </div>
+  );
 }

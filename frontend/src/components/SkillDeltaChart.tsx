@@ -131,7 +131,12 @@ export function SkillDeltaChart({
     () =>
       client
         .getQueryCache()
-        .subscribe(() => setGpma2CacheVersion((version) => version + 1)),
+        .subscribe((event) => {
+          const key = event?.query.queryKey;
+          if (Array.isArray(key) && key[0] === "gpma2-series") {
+            queueMicrotask(() => setGpma2CacheVersion((version) => version + 1));
+          }
+        }),
     [client],
   );
   const gpma2Candidates = client

@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import date
 import json
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 import pandas as pd
 
@@ -13,6 +13,7 @@ from app.services.data_freshness import freshness_snapshot
 from app.services.futu_gpmapro_trace import FutuGpmaProTraceClient
 from app.services.gpmaapro_engine import GpmaAproEngine, SIGNALS as GPMA2_SIGNALS
 from app.services.gpmapro_engine import GpmaProEngine
+from app.services.news_advice import ACTION_GUIDANCE, ACTION_LABEL, apply_news_overlay
 
 
 RECENT_BARS = 5
@@ -101,8 +102,9 @@ def _indicator_summary(name: str, data: pd.DataFrame, bullish: Iterable[str], be
 
 
 class SignalInterpretationService:
-    def __init__(self):
+    def __init__(self, news_advice=None):
         self.gpma1, self.gpma2 = GpmaProEngine(), GpmaAproEngine()
+        self.news_advice = news_advice
 
     @staticmethod
     def _delta(data: pd.DataFrame) -> dict:
@@ -147,7 +149,7 @@ class SignalInterpretationService:
             # labelled research-grade signal such as S01.
             return "LOCAL_RENDERER_FALLBACK", None
 
-    def interpret(self, bars: pd.DataFrame, symbol: str, timeframe: str, source: dict, as_of: str | None = None, *, _authority: tuple[str, str | None] | None = None, _include_audit: bool = True, _skip_gpma2: bool = False, _precomputed_gpma1: pd.DataFrame | None = None, _precomputed_gpma2: pd.DataFrame | None = None) -> dict:
+    def interpret(self, bars: pd.DataFrame, symbol: str, timeframe: str, source: dict, as_of: str | None = None, *, _authority: tuple[str, str | None] | None = None, _include_audit: bool = True, _include_news: bool = True, _skip_gpma2: bool = False, _precomputed_gpma1: pd.DataFrame | None = None, _precomputed_gpma2: pd.DataFrame | None = None) -> dict:
         data = bars.copy().sort_values("date").reset_index(drop=True)
         data["date"] = pd.to_datetime(data["date"])
         if as_of:
@@ -269,10 +271,31 @@ class SignalInterpretationService:
             summary = "GPMA2 出现研究级卖出信号；存在反向 DELTA 结构时采取适当卖出并继续观察。" if delta_has_low else "GPMA2 出现研究级卖出信号，建议适当卖出并等待稳定版确认。"
         elif action == "ACCUMULATE" and fallback_accumulate:
             summary = "GPMA2 出现研究级买入信号，建议适当买入并等待稳定版确认。"
+        base_action, base_action_label, base_action_strength = action, action_label, action_strength
+        news: dict[str, Any] = {"status": "UNAVAILABLE", "action": "HOLD", "action_label": "观望", "bias": "NEUTRAL", "score": 0.0,
+                                "confidence": 0.0, "validation_status": "INSUFFICIENT_EVIDENCE", "concise_reason": "新闻证据暂不可用，不影响技术结论。",
+                                "contribution": {"enabled": False, "points": 0.0, "effect": "NONE"}, "earliest_trade_at": None}
+        if _include_news and self.news_advice is not None:
+            try:
+                news = self.news_advice.advice(symbol, as_of=as_of)
+            except Exception as error:
+                news = {**news, "concise_reason": f"新闻覆盖层暂不可用：{str(error) or type(error).__name__}"}
+        overlay = apply_news_overlay(base_action, base_action_strength, news)
+        action, action_strength = overlay["action"], overlay["action_strength"]
+        action_label = ACTION_LABEL[action]
+        if action != base_action:
+            position_guidance = ACTION_GUIDANCE[action]
+            blocked_by.append(f"经验证的负面新闻覆盖层将技术行动由{base_action_label}下调为{action_label}，最多下调一级。")
+            next_steps = [news["concise_reason"], *next_steps]
+        elif overlay["effect"] == "CONFIRM":
+            next_steps = [f"新闻因子以 {overlay['applied_points']:+.2f} 点低权重确认当前技术方向。", *next_steps]
         drivers = [
             {"id": "delta", "title": "DELTA 结构", "status": delta_direction, "detail": f"{len(delta['active_windows'])} 个确认后 {DELTA_ACTION_WINDOW_BARS} bar 行动窗口", "date": delta["active_windows"][-1]["actual_date"] if delta["active_windows"] else None},
             {"id": "gpmapro", "title": "稳定 GPMAPRO", "status": gpma1["direction"], "detail": " · ".join(item["code"] for item in [*gpma1["bullish_signals"], *gpma1["bearish_signals"], *gpma1["bullish_divergences"], *gpma1["bearish_divergences"]]) or "近期无最终 B/S 或背离", "date": next((item["date"] for item in evidence if item["source"] == "GPMAPRO"), None)},
             {"id": "gpma2", "title": "GPMA2 研究确认", "status": gpma2["source_status"], "detail": "已对账确认" if gpma2["source_status"] == "AVAILABLE" else "本地等价绘图回退，不单独触发行等级", "date": next((item["date"] for item in evidence if item["source"] == "GPMA2"), None)},
+            {"id": "news", "title": "新闻因子", "status": news.get("bias", "NEUTRAL"),
+             "detail": f"{news.get('action_label', '观望')}，{news.get('concise_reason', '新闻证据不足')} 总览调整 {overlay['applied_points']:+.2f} 点。",
+             "date": None, "detail_target": "NEWS_CENTER"},
         ]
         signal_details = []
         for event in delta["active_windows"]:
@@ -290,12 +313,12 @@ class SignalInterpretationService:
             "filters_passed": buy_filters,
             "gpma2_authoritative": gpma2_is_authoritative,
         }
-        result = {"symbol": symbol.upper(), "timeframe": timeframe, "as_of": data.date.iloc[-1].date().isoformat(), "snapshot": source, "state": state, "direction": direction, "summary": summary, "research_only": True, "action": action, "action_label": action_label, "action_strength": action_strength, "position_guidance": position_guidance, "rule_id": ACTION_RULE_VERSION, "next_steps": next_steps, "drivers": drivers, "validation": {"status": "PENDING_CALIBRATION", "rule_id": ACTION_RULE_VERSION, "message": "行动等级将按同一规则 ID 接入 DELTA × GPMAPRO 事件研究与样本外验证；当前不以未经校准的历史收益承诺行动结果。"}, "delta": delta, "indicators": indicators, "signal_details": signal_details, "evidence": evidence, "missing_conditions": missing, "conflicts": conflict_reasons, "blocked_by": list(dict.fromkeys(blocked_by)), "action_eligible": action in {"BUY", "ACCUMULATE", "REDUCE", "SELL"}, "rule_trace": rule_trace, "version_agreement": "AGREE" if gpma1["direction"] == gpma2["direction"] else "ONE_NEUTRAL" if "NEUTRAL" in {gpma1["direction"], gpma2["direction"]} else "DISAGREE"}
+        result = {"symbol": symbol.upper(), "timeframe": timeframe, "as_of": data.date.iloc[-1].date().isoformat(), "snapshot": source, "state": state, "direction": direction, "summary": summary, "research_only": True, "base_action": base_action, "base_action_label": base_action_label, "base_action_strength": base_action_strength, "action": action, "action_label": action_label, "action_strength": action_strength, "position_guidance": position_guidance, "news_overlay": {"status": news.get("status"), "action": news.get("action"), "bias": news.get("bias"), "score": news.get("score"), "confidence": news.get("confidence"), "validation_status": news.get("validation_status"), "reason": news.get("concise_reason"), **overlay}, "rule_id": ACTION_RULE_VERSION, "next_steps": next_steps, "drivers": drivers, "validation": {"status": "PENDING_CALIBRATION", "rule_id": ACTION_RULE_VERSION, "message": "行动等级将按同一规则 ID 接入 DELTA × GPMAPRO 事件研究与样本外验证；当前不以未经校准的历史收益承诺行动结果。"}, "delta": delta, "indicators": indicators, "signal_details": signal_details, "evidence": evidence, "missing_conditions": missing, "conflicts": conflict_reasons, "blocked_by": list(dict.fromkeys(blocked_by)), "action_eligible": action in {"BUY", "ACCUMULATE", "REDUCE", "SELL"}, "rule_trace": {**rule_trace, "news_overlay_applied": overlay["applied_points"]}, "version_agreement": "AGREE" if gpma1["direction"] == gpma2["direction"] else "ONE_NEUTRAL" if "NEUTRAL" in {gpma1["direction"], gpma2["direction"]} else "DISAGREE"}
         if _include_audit:
             authority = (status, script_hash)
             # The audit uses the same research-grade GPMA2 rule as the current
             # action card, while reusing the authority lookup from this request.
-            audit_rows = [self.interpret(bars, symbol, timeframe, source, as_of=day.date().isoformat(), _authority=authority, _include_audit=False, _precomputed_gpma1=gpma1_data, _precomputed_gpma2=gpma2_data) for day in data.date.tail(30)]
+            audit_rows = [self.interpret(bars, symbol, timeframe, source, as_of=day.date().isoformat(), _authority=authority, _include_audit=False, _include_news=False, _precomputed_gpma1=gpma1_data, _precomputed_gpma2=gpma2_data) for day in data.date.tail(30)]
             counts: dict[str, int] = {}
             blockers: dict[str, int] = {}
             for row in audit_rows:

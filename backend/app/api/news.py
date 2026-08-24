@@ -1,22 +1,23 @@
-from pathlib import Path
-
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, BackgroundTasks, HTTPException
 
 from app.core.config import get_settings
 from app.config.news_sources import enabled_sources, source_catalog
 from app.services.news import NewsError
-from app.services.news_factor import NewsFactorService
-from app.services.news_factor_evaluation import NewsFactorEvaluationService
-from app.services.news_research import NewsResearchService
-from app.services.news_runtime import get_news_service
-from app.services.market_volatility_alerts import MarketVolatilityAlertService
+from app.services.news_runtime import (
+    get_news_advice_service,
+    get_news_evaluation_service,
+    get_news_factor_service,
+    get_news_research_service,
+    get_news_service,
+)
 
 router = APIRouter(tags=["news"])
 settings = get_settings()
-evaluation_service = NewsFactorEvaluationService(Path(__file__).resolve().parents[3] / "data" / "news_factor_snapshots", Path(__file__).resolve().parents[3] / "data" / "imported")
 news_service = get_news_service()
-factor_service = NewsFactorService(news_service, Path(__file__).resolve().parents[3] / "data" / "news_cache", evaluation_service)
-research_service = NewsResearchService(news_service, MarketVolatilityAlertService())
+evaluation_service = get_news_evaluation_service()
+factor_service = get_news_factor_service()
+research_service = get_news_research_service()
+advice_service = get_news_advice_service()
 
 
 @router.get("/news/sources")
@@ -31,7 +32,7 @@ def news_health():
 
 @router.post("/news/factor/snapshot")
 def news_factor_snapshot(refresh: bool = True):
-    return factor_service.snapshot(refresh=refresh)
+    return factor_service.ensure_daily_snapshot(refresh=refresh)
 
 
 @router.get("/news/factor/candidates")
@@ -47,6 +48,17 @@ def news_factor_snapshots():
 @router.get("/news/factor/evaluation")
 def news_factor_evaluation():
     return evaluation_service.evaluate()
+
+
+@router.get("/news/{code}/advice")
+def news_advice(code: str, background_tasks: BackgroundTasks, refresh: bool = False, as_of: str | None = None):
+    if not settings.news_enabled:
+        raise HTTPException(503, "新闻功能当前已关闭。")
+    try:
+        background_tasks.add_task(factor_service.ensure_daily_snapshot, refresh=False)
+        return advice_service.advice(code, refresh=refresh, as_of=as_of)
+    except NewsError as error:
+        raise HTTPException(422, str(error))
 
 
 @router.get("/news/{code}/insight")

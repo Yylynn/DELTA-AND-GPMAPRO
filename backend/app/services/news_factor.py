@@ -1,10 +1,13 @@
 """Point-in-time news-factor snapshots and research-only candidate ranking."""
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, time as dt_time, timezone
 from math import exp
 import json
 from pathlib import Path
+from threading import RLock
+from typing import Callable
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -13,23 +16,28 @@ from app.data.providers import CsvDataProvider
 from app.quant.delta_time import ITDDeltaEngine
 from app.services.gpmapro_engine import GpmaProEngine
 from app.services.news import NewsService
+from app.services.news_advice import NewsFactorCalculator
+from app.services.trading_calendar import is_session
 
-EVENT_WEIGHT = {"EARNINGS": 1.0, "GUIDANCE": 1.0, "M&A": .9, "REGULATION": .9, "LEGAL": .9, "PRODUCT": .65, "ANALYST_RATING": .6, "OTHER": .35}
+NY = ZoneInfo("America/New_York")
 
 
 class NewsFactorService:
-    def __init__(self, news: NewsService, root: Path, evaluation=None) -> None:
+    def __init__(self, news: NewsService, root: Path, evaluation=None, now: Callable[[], datetime] | None = None) -> None:
         self.news, self.root = news, root
         self.evaluation = evaluation
         self.provider = CsvDataProvider(root.parent / "imported")
         self.gpma = GpmaProEngine()
         self.snapshot_root = root.parent / "news_factor_snapshots"
+        self.calculator = NewsFactorCalculator()
+        self._now = now or (lambda: datetime.now(timezone.utc))
+        self._snapshot_lock = RLock()
 
     def _symbols(self) -> list[str]:
         return list(RESEARCH_UNIVERSE)
 
-    def _market_filter(self, all_items: list[dict]) -> dict:
-        now = datetime.now(timezone.utc)
+    def _market_filter(self, all_items: list[dict], captured_at: str | None = None) -> dict:
+        now = pd.Timestamp(captured_at or self._now().isoformat()).to_pydatetime()
         values, sources = [], set()
         for item in all_items:
             if item.get("scope") != "MARKET" or not item.get("published_at"): continue
@@ -57,51 +65,85 @@ class NewsFactorService:
             return {"status": "UNAVAILABLE", "reason": str(error), "gpma_bullish": False, "gpma_active_buy": False, "delta_low_active": False}
 
     @staticmethod
-    def _components(response: dict, captured_at: str) -> dict:
-        now = pd.Timestamp(captured_at); eligible = []
-        for item in response.get("company_items", response.get("items", [])):
-            if not item.get("factor_eligible") or not item.get("published_at") or not item.get("earliest_trade_at"): continue
-            age = max(0.0, (now - pd.Timestamp(item["published_at"])).total_seconds() / 3600)
-            analysis = item.get("analysis", {}); relevance = 1.0 if item.get("entity_matches") else 0.0
-            weight = exp(-age / 72) * EVENT_WEIGHT.get(analysis.get("event_type", "OTHER"), .35) * relevance
-            eligible.append((item, float(analysis.get("sentiment_score", 0)), weight))
-        denominator = sum(weight for _, _, weight in eligible)
-        sentiment = sum(score * weight for _, score, weight in eligible) / denominator if denominator else 0.0
-        negative = any(item.get("analysis", {}).get("high_impact") and item.get("analysis", {}).get("direction") == "BEARISH" for item, _, _ in eligible)
-        published = [item for item in response.get("company_items", []) if item.get("published_at")]
-        sources = {item.get("source_id") for item, _, _ in eligible if item.get("source_id")}
-        return {"company_sentiment": round(sentiment, 6), "news_count": len(eligible), "news_intensity": 0.0,
-                "negative_major_event": negative, "earliest_trade_at": min((item["earliest_trade_at"] for item, _, _ in eligible), default=None),
-                "data_quality": {"valid_article_count": len(eligible), "source_count": len(sources), "sources": sorted(sources),
-                                 "published_at_completeness": round(len(published) / max(1, len(response.get("company_items", []))), 4),
-                                 "model_status": "FINBERT" if eligible else "NO_ELIGIBLE_MODEL_OUTPUT",
-                                 "coverage_gaps": [source for source in ("openbb_yfinance", "sec_edgar", "finnhub_company") if source not in sources]}}
+    def _components(response: dict, captured_at: str, history_counts: list[float] | None = None) -> dict:
+        return NewsFactorCalculator().calculate(response, captured_at, history_counts=history_counts or [])
+
+    def _v3_snapshots(self, *, include_invalid: bool = True) -> list[dict]:
+        rows = []
+        for path in sorted(self.snapshot_root.glob("*.json")) if self.snapshot_root.exists() else []:
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if payload.get("schema_version") != 3:
+                continue
+            if include_invalid or payload.get("quality_status") == "VALID":
+                payload["_snapshot_id"] = path.stem
+                rows.append(payload)
+        return rows
+
+    def _history_counts(self, symbol: str) -> list[float]:
+        values = []
+        for payload in self._v3_snapshots(include_invalid=True)[-60:]:
+            feature = payload.get("features", {}).get(symbol)
+            if feature:
+                values.append(float(feature.get("news_count", 0)))
+        return values
 
     def snapshot(self, *, refresh: bool = True) -> dict:
-        captured_at = datetime.now(timezone.utc).isoformat()
+        with self._snapshot_lock:
+            return self._create_snapshot(refresh=refresh)
+
+    def _create_snapshot(self, *, refresh: bool = True) -> dict:
+        captured = self._now().astimezone(timezone.utc)
+        captured_at = captured.isoformat()
+        session_date = captured.astimezone(NY).date().isoformat()
+        existing = next((row for row in reversed(self._v3_snapshots(include_invalid=True)) if row.get("session_date") == session_date), None)
+        if existing:
+            return {"schema_version": 3, "snapshot_id": existing["_snapshot_id"], "captured_at": existing["captured_at"],
+                    "session_date": session_date, "symbols_captured": len(existing.get("responses", [])),
+                    "quality_status": existing.get("quality_status"), "failures": existing.get("failures", []),
+                    "source_health": existing.get("source_health", []), "idempotent": True}
         rows, failures = [], []
         for symbol in self._symbols():
             try: rows.append(self.news.get(f"US.{symbol}", limit=100, refresh=refresh))
             except Exception as error: failures.append({"symbol": symbol, "error": str(error)})
-        components = {row["symbol"]: self._components(row, captured_at) for row in rows}
-        counts = pd.Series({symbol: value["news_count"] for symbol, value in components.items()}, dtype=float)
-        std = float(counts.std(ddof=0))
-        for symbol, value in components.items():
-            value["news_intensity"] = round((value["news_count"] - float(counts.mean())) / std, 6) if std else 0.0
-            value["baseline_score"] = round((value["company_sentiment"] + value["news_intensity"] - float(value["negative_major_event"])) / 3, 6)
-        payload = {"schema_version": 2, "quality_status": "VALID", "captured_at": captured_at, "symbols": [row["symbol"] for row in rows], "responses": rows, "features": components, "failures": failures, "source_health": self.news.source_health()}
+        components = {row["symbol"]: self._components(row, captured_at, self._history_counts(row["symbol"])) for row in rows}
+        eligible_symbols = sum(value.get("data_quality", {}).get("valid_article_count", 0) > 0 for value in components.values())
+        captured_ratio = len(rows) / max(1, len(RESEARCH_UNIVERSE))
+        quality_status = "VALID" if captured_ratio >= .7 and eligible_symbols >= 10 else "INSUFFICIENT_COVERAGE"
+        payload = {"schema_version": 3, "quality_status": quality_status, "captured_at": captured_at,
+                   "session_date": session_date, "symbols": [row["symbol"] for row in rows], "responses": rows,
+                   "features": components, "failures": failures, "source_health": self.news.source_health(),
+                   "coverage": {"configured": len(RESEARCH_UNIVERSE), "captured": len(rows), "captured_ratio": round(captured_ratio, 4),
+                                "symbols_with_eligible_news": eligible_symbols}}
         self.snapshot_root.mkdir(parents=True, exist_ok=True)
-        path = self.snapshot_root / f"{captured_at.replace(':', '-').replace('+', '_')}.json"
-        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        return {"schema_version": 2, "snapshot_id": path.stem, "captured_at": captured_at, "symbols_captured": len(rows), "failures": failures, "source_health": payload["source_health"]}
+        path = self.snapshot_root / f"v3_{session_date}.json"
+        try:
+            with path.open("x", encoding="utf-8") as stream:
+                json.dump(payload, stream, ensure_ascii=False, indent=2)
+        except FileExistsError:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+            return {"schema_version": 3, "snapshot_id": path.stem, "captured_at": existing["captured_at"],
+                    "session_date": session_date, "symbols_captured": len(existing.get("responses", [])),
+                    "quality_status": existing.get("quality_status"), "failures": existing.get("failures", []),
+                    "source_health": existing.get("source_health", []), "idempotent": True}
+        return {"schema_version": 3, "snapshot_id": path.stem, "captured_at": captured_at, "session_date": session_date,
+                "symbols_captured": len(rows), "quality_status": quality_status, "failures": failures,
+                "source_health": payload["source_health"], "idempotent": False}
+
+    def ensure_daily_snapshot(self, *, refresh: bool = False) -> dict:
+        local = self._now().astimezone(NY)
+        if not is_session(local.date()) or local.time() < dt_time(16, 15):
+            return {"status": "NOT_DUE", "session_date": local.date().isoformat()}
+        existing = next((row for row in reversed(self._v3_snapshots(include_invalid=True)) if row.get("session_date") == local.date().isoformat()), None)
+        if existing:
+            return {"status": "CURRENT", "session_date": local.date().isoformat(), "snapshot_id": existing["_snapshot_id"]}
+        return {"status": "CREATED", **self.snapshot(refresh=refresh)}
 
     def _latest(self) -> dict | None:
-        files = sorted(self.snapshot_root.glob("*.json"), reverse=True) if self.snapshot_root.exists() else []
-        for path in files:
-            try: payload = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError): continue
-            if payload.get("schema_version") == 2 and payload.get("quality_status") == "VALID": return payload
-        return None
+        snapshots = self._v3_snapshots(include_invalid=True)
+        return snapshots[-1] if snapshots else None
 
     def candidates(self, limit: int = 5) -> dict:
         snapshot = self._latest()
@@ -109,33 +151,25 @@ class NewsFactorService:
         # `items` is intentionally company-only for backwards compatibility;
         # macro evidence lives in its own field and must feed the risk filter.
         all_items = [item for response in snapshot["responses"] for item in response.get("market_items", [])]
-        market = self._market_filter(all_items)
+        market = self._market_filter(all_items, snapshot.get("captured_at"))
         validation = self.evaluation.evaluate() if self.evaluation is not None else {"status": "INSUFFICIENT_EVIDENCE"}
         validated = validation.get("status") == "VALIDATED"
-        now = datetime.now(timezone.utc); candidates = []
+        candidates = []
         for response in snapshot["responses"]:
             symbol = response["symbol"].removeprefix("US.")
-            articles = []
-            for item in response.get("items", []):
-                if item.get("scope") != "COMPANY" or item.get("entity_status") != "ACCEPTED" or not item.get("published_at"): continue
-                try: age = max(0, (now - pd.Timestamp(item["published_at"]).to_pydatetime()).total_seconds() / 3600)
-                except (TypeError, ValueError): continue
-                if age > 24: continue
-                analysis = item.get("analysis", {})
-                if analysis.get("method") != "FINBERT": continue
-                articles.append((item, float(analysis.get("sentiment_score", 0)) * EVENT_WEIGHT.get(analysis.get("event_type", "OTHER"), .35) * exp(-age / 36)))
-            feature = snapshot.get("features", {}).get(response["symbol"], {}); score = float(feature.get("baseline_score", 0))
+            feature = snapshot.get("features", {}).get(response["symbol"], {}); score = float(feature.get("factor_score", 0))
+            articles = [item for item in feature.get("evidence", []) if item.get("eligible")]
             technical = self._technical(symbol)
-            negative = any(item.get("analysis", {}).get("high_impact") and item.get("analysis", {}).get("direction") == "BEARISH" for item, _ in articles)
+            negative = bool(feature.get("negative_major_event"))
             if market["status"] == "RED": tier = "FILTERED"
             elif score > 0 and technical["gpma_bullish"] and technical["gpma_active_buy"] and technical["delta_low_active"] and not negative: tier = "FOCUS"
             elif score > 0 and not negative: tier = "WATCH"
             else: tier = "FILTERED"
             research_state = "INSUFFICIENT_EVIDENCE"
             if validated: research_state = "NEGATIVE_AVOID" if negative or score <= -.15 else "POSITIVE_WATCH" if score >= .15 else "NEUTRAL"
-            candidates.append({"symbol": response["symbol"], "tier": tier, "research_state": research_state, "news_score": round(score, 4), "components": feature, "article_count": len(articles), "negative_catalyst": negative, "market_risk_filter": market, "technical": technical, "earliest_trade_at": feature.get("earliest_trade_at"), "historical_prediction_confidence": None, "validation_status": validation.get("status"), "evidence": [{key: item.get(key) for key in ("id", "title", "url", "publisher", "published_at", "available_at", "earliest_trade_at", "analysis", "entity_matches")} for item, _ in articles]})
+            candidates.append({"symbol": response["symbol"], "tier": tier, "research_state": research_state, "news_score": round(score, 4), "components": feature, "article_count": len(articles), "negative_catalyst": negative, "market_risk_filter": market, "technical": technical, "earliest_trade_at": feature.get("earliest_trade_at"), "historical_prediction_confidence": None, "validation_status": validation.get("status"), "evidence": articles})
         ordered = sorted(candidates, key=lambda item: item["news_score"], reverse=True)
-        return {"status": "RESEARCH_ONLY", "validation_status": validation.get("status"), "snapshot_at": snapshot["captured_at"], "market_risk_filter": market, "candidates": ordered[:max(1, min(limit, 20))], "universe_coverage": {"configured": len(RESEARCH_UNIVERSE), "captured": len(snapshot["responses"]), "with_local_ohlcv": len(self.provider.symbols())}, "message": "已通过样本外统计门槛，仅输出研究观察状态。" if validated else "历史预测可信度尚未验证；未达统计门槛前仅展示证据不足。"}
+        return {"status": "RESEARCH_ONLY", "validation_status": validation.get("status"), "snapshot_at": snapshot["captured_at"], "snapshot_quality": snapshot.get("quality_status"), "market_risk_filter": market, "candidates": ordered[:max(1, min(limit, 20))], "universe_coverage": {"configured": len(RESEARCH_UNIVERSE), "captured": len(snapshot["responses"]), "with_local_ohlcv": len(self.provider.symbols()), "with_eligible_news": snapshot.get("coverage", {}).get("symbols_with_eligible_news", 0)}, "message": "已通过样本外统计门槛，仅输出研究观察状态。" if validated else "历史预测可信度尚未验证；未达统计门槛前仅展示证据不足。"}
 
     def snapshots(self) -> list[dict]:
-        return [{"snapshot_id": path.stem, "captured_at": path.stem.replace("_", "+").replace("-", ":", 2)} for path in sorted(self.snapshot_root.glob("*.json"), reverse=True)] if self.snapshot_root.exists() else []
+        return [{"snapshot_id": row["_snapshot_id"], "captured_at": row.get("captured_at"), "session_date": row.get("session_date"), "schema_version": 3, "quality_status": row.get("quality_status")} for row in reversed(self._v3_snapshots(include_invalid=True))]

@@ -321,6 +321,40 @@ class NewsService:
             status, warning = "LIVE", "；".join(warnings) if warnings else None
         return self._response(payload, status, False, warning, limit)
 
+    def get_at(self, code: str, as_of: str, *, limit: int = 100) -> dict[str, Any]:
+        """Read the latest immutable news snapshot known at a historical cutoff."""
+        if not 1 <= limit <= 100:
+            raise NewsError("limit 必须介于 1 到 100")
+        normalized_code, symbol = code.strip().upper(), provider_symbol(code)
+        try:
+            cutoff = pd.Timestamp(as_of)
+            if cutoff.tzinfo is None:
+                if len(str(as_of).strip()) <= 10:
+                    cutoff = cutoff + pd.Timedelta(hours=16)
+                cutoff = cutoff.tz_localize("America/New_York")
+            cutoff = cutoff.tz_convert("UTC")
+        except (TypeError, ValueError):
+            raise NewsError("as_of 必须是有效日期或带时区时间")
+        folder = self.cache_dir.parent / "news_history" / normalized_code.replace(".", "_")
+        selected: tuple[pd.Timestamp, dict[str, Any]] | None = None
+        for path in folder.glob("*.json") if folder.exists() else []:
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                fetched = pd.Timestamp(payload["fetched_at"])
+                if fetched.tzinfo is None:
+                    fetched = fetched.tz_localize("UTC")
+                fetched = fetched.tz_convert("UTC")
+            except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
+                continue
+            if fetched <= cutoff and (selected is None or fetched > selected[0]):
+                selected = (fetched, payload)
+        if selected is None:
+            return {"symbol": normalized_code, "provider_symbol": symbol, "items": [], "company_items": [], "market_items": [],
+                    "source_status": "UNAVAILABLE", "fetched_at": None, "is_cached": False,
+                    "warning": "该时间点之前没有已保存的新闻快照。", "dropped_unapproved_sources": [],
+                    "source_warnings": [], "source_health": self.source_health()}
+        return self._response(selected[1], "CACHED", True, "正在展示该时间点之前最后一份不可变新闻快照。", limit)
+
     def insight(self, code: str, *, as_of: str | None = None) -> dict[str, Any]:
         normalized_code, cached = code.strip().upper(), self._read_cache(code.strip().upper())
         if as_of:

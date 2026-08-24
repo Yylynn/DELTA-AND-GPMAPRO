@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi.testclient import TestClient
 
@@ -147,6 +147,21 @@ def test_news_service_returns_stale_cache_when_provider_fails(tmp_path) -> None:
     assert result["items"][0]["title"] == "AAPL Cached item"
 
 
+def test_news_service_historical_read_never_uses_a_later_snapshot(tmp_path) -> None:
+    clock = [NOW]
+    provider = FakeProvider([{"title": "AAPL first snapshot", "date": "2026-08-19T07:30:00Z", "source": "TheStreet"}])
+    service = NewsService(tmp_path, ttl_seconds=0, provider=provider, now=lambda: clock[0])
+    service.get("US.AAPL", refresh=True)
+    clock[0] = NOW + timedelta(hours=2)
+    provider.rows = [{"title": "AAPL later snapshot", "date": "2026-08-19T09:30:00Z", "source": "TheStreet"}]
+    service.get("US.AAPL", refresh=True)
+
+    historical = service.get_at("US.AAPL", (NOW + timedelta(hours=1)).isoformat())
+    before_history = service.get_at("US.AAPL", (NOW - timedelta(hours=1)).isoformat())
+    assert historical["items"][0]["title"] == "AAPL first snapshot"
+    assert before_history["source_status"] == "UNAVAILABLE"
+
+
 def test_news_service_without_cache_has_readable_unavailable_status(tmp_path) -> None:
     service = NewsService(tmp_path, provider=FakeProvider(error=RuntimeError("upstream down")), now=lambda: NOW)
     result = service.get("US.AAPL")
@@ -166,6 +181,26 @@ def test_news_api_validates_code_and_returns_service_schema(monkeypatch, tmp_pat
     assert {"symbol", "provider_symbol", "items", "company_items", "market_items", "source_status", "fetched_at", "is_cached", "warning", "dropped_unapproved_sources", "source_warnings", "source_health"} == set(response.json())
     invalid = client.get("/api/news/SH.600519")
     assert invalid.status_code == 422
+
+
+def test_news_advice_api_exposes_strict_decision_contract(monkeypatch) -> None:
+    import app.api.news as news_api
+
+    class Advice:
+        def advice(self, code, *, refresh=False, as_of=None):
+            return {"symbol": code, "action": "HOLD", "bias": "BEARISH", "score": -.3, "confidence": .7,
+                    "validation_status": "INSUFFICIENT_EVIDENCE", "concise_reason": "样本不足。",
+                    "contribution": {"enabled": False, "points": 0, "effect": "NONE"}}
+
+    class Factor:
+        def ensure_daily_snapshot(self, *, refresh=False): return {"status": "NOT_DUE"}
+
+    monkeypatch.setattr(news_api, "advice_service", Advice())
+    monkeypatch.setattr(news_api, "factor_service", Factor())
+    response = TestClient(app).get("/api/news/US.MU/advice")
+    assert response.status_code == 200
+    assert response.json()["action"] == "HOLD"
+    assert response.json()["contribution"]["points"] == 0
 
 
 def test_adverse_news_vetoes_a_buy_but_never_creates_a_buy() -> None:

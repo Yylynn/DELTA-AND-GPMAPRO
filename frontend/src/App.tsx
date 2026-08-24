@@ -532,7 +532,7 @@ function MarketVolatilityAlerts({
   );
 }
 
-function Overview() {
+function Overview({ onOpenNews }: { onOpenNews: (symbol: string) => void }) {
   const [symbol, setSymbol] = useState("US.VXN");
   const [draft, setDraft] = useState("VXN");
   const [market, setMarket] = useState<Market>("US");
@@ -747,6 +747,7 @@ function Overview() {
         timeframe={timeframe}
         snapshotId={snapshotId}
         onFocusDate={setFocusDate}
+        onOpenNews={onOpenNews}
       />
       <div className="overview-status-grid">
         <section className="panel p-4">
@@ -993,6 +994,7 @@ function FutuSnapshotData() {
 }
 export default function App() {
   const [page, setPage] = useState("overview");
+  const [newsContext, setNewsContext] = useState({ code: "US.AAPL", openDetails: false, key: 0 });
   const [navigationOpen, setNavigationOpen] = useState(
     () => typeof window !== "undefined" && window.innerWidth >= 768,
   );
@@ -1046,6 +1048,10 @@ export default function App() {
   useEffect(() => {
     if (page === "overview") void checkAlerts();
   }, [page, checkAlerts]);
+  const openNews = useCallback((code: string) => {
+    setNewsContext(previous => ({ code, openDetails: true, key: previous.key + 1 }));
+    setPage("news");
+  }, []);
   const nav = useMemo(
     () => [
       { id: "overview", label: "总览", Icon: Gauge },
@@ -1058,7 +1064,7 @@ export default function App() {
     [],
   );
   const pages: Record<string, ReactNode> = {
-    overview: <Overview />,
+    overview: <Overview onOpenNews={openNews} />,
     alerts: (
       <MarketVolatilityAlerts
         data={marketAlerts.data}
@@ -1075,7 +1081,7 @@ export default function App() {
         <ResearchDataset />
       </>
     ),
-    news: <NewsCenter />,
+    news: <NewsCenter initialCode={newsContext.code} initialDetailsOpen={newsContext.openDetails} contextKey={newsContext.key} />,
     settings: <Settings />,
   };
   const activePage =
@@ -1098,6 +1104,7 @@ export default function App() {
               <button
                 key={id}
                 onClick={() => {
+                  if (id === "news") setNewsContext(previous => ({ ...previous, openDetails: false, key: previous.key + 1 }));
                   setPage(id);
                   if (window.innerWidth < 768) setNavigationOpen(false);
                 }}

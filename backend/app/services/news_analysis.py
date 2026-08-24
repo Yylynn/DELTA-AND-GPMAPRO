@@ -5,6 +5,8 @@ from math import exp
 from typing import Any
 import re
 
+from app.services.news_advice import is_generic_sec_filing
+
 ANALYSIS_VERSION = "news-analysis-v2"
 
 
@@ -46,6 +48,11 @@ class NewsAnalyzer:
         text = f"{title} {summary or ''}".strip()
         language = "ZH" if re.search(r"[\u3400-\u9fff]", text) else "EN"
         event_type = event_type_hint or next((name for name, terms in EVENTS.items() if any(term in text.casefold() for term in terms)), "OTHER")
+        if is_generic_sec_filing(title):
+            return {"method": "METADATA_ONLY", "analysis_version": ANALYSIS_VERSION, "language": language,
+                    "positive_probability": 0.0, "negative_probability": 0.0, "neutral_probability": 1.0,
+                    "sentiment_score": 0.0, "direction": "NEUTRAL", "event_type": event_type,
+                    "high_impact": False, "model_eligible": False}
         if language == "ZH":
             return {"method": "UNSUPPORTED_LANGUAGE", "analysis_version": ANALYSIS_VERSION, "language": language,
                     "positive_probability": 0.0, "negative_probability": 0.0, "neutral_probability": 1.0,

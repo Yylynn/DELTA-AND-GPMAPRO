@@ -154,3 +154,22 @@ def test_gpma2_opend_failure_keeps_local_renderer_fallback(monkeypatch):
         def calculate(self, *_args, **_kwargs): raise RuntimeError("OpenD unavailable")
     monkeypatch.setattr("app.services.signal_interpretation.FutuGpmaProTraceClient", _TraceClient)
     assert SignalInterpretationService._gpma2_authority(_frame(), "US.TEST", "1d") == ("LOCAL_RENDERER_FALLBACK", None)
+
+
+def test_validated_negative_news_overlay_downgrades_exactly_one_level(monkeypatch):
+    class Advice:
+        def advice(self, *_args, **_kwargs):
+            return {"status": "AVAILABLE", "action": "SELL", "action_label": "卖出", "bias": "BEARISH", "score": -.8,
+                    "confidence": .8, "validation_status": "VALIDATED", "concise_reason": "重大负面事件已跨源确认。",
+                    "contribution": {"enabled": True, "points": -12, "effect": "DOWNGRADE"}, "earliest_trade_at": None}
+
+    gpma1, gpma2 = _frame(), _frame(); gpma1.loc[1, "b1"] = True
+    service = SignalInterpretationService(Advice()); service.gpma1, service.gpma2 = _Engine(gpma1), _Engine(gpma2)
+    monkeypatch.setattr(service, "_gpma2_authority", lambda *_: ("LOCAL_RENDERER_FALLBACK", None))
+    monkeypatch.setattr(service, "_delta", lambda data: {"status": "READY", "direction": "BULLISH", "reversal_state": "NORMAL", "active_windows": [{"event_id": "low", "event_type": "LOW", "direction": "BULLISH", "actual_date": data.date.iloc[-1].date().isoformat(), "confirmed_on": data.date.iloc[-1].date().isoformat(), "tradable_on": data.date.iloc[-1].date().isoformat(), "delta_window_start": data.date.iloc[-1].date().isoformat(), "delta_window_end": data.date.iloc[-1].date().isoformat(), "bars_since": 0, "action_eligible": True, "active": True}]})
+    bars = pd.DataFrame({"date": gpma1.date, "open": [10, 10], "high": [11, 11], "low": [9, 9], "close": [10, 10], "volume": [100, 100]})
+    result = service.interpret(bars, "US.TEST", "1d", {}, _include_audit=False)
+    assert result["base_action"] == "BUY"
+    assert result["action"] == "ACCUMULATE"
+    assert result["news_overlay"]["applied_points"] == -12
+    assert next(item for item in result["drivers"] if item["id"] == "news")["detail_target"] == "NEWS_CENTER"
