@@ -81,12 +81,11 @@ class FutuSnapshotService:
         if not manifest_path.exists() or not csv_path.exists():
             raise FileNotFoundError(snapshot_id)
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        raw_payload = csv_path.read_bytes()
         frame, quality = validate_ohlcv(pd.read_csv(csv_path))
-        # Legacy snapshots predate explicit hashes.  Derive the hash in memory
-        # without rewriting their immutable manifest, so they remain auditable.
-        actual_sha256 = hashlib.sha256(
-            frame.to_csv(index=False, lineterminator="\n").encode("utf-8")
-        ).hexdigest()
+        # Legacy snapshots predate explicit hashes.  Derive the hash from the
+        # exact stored bytes without rewriting their immutable manifest.
+        actual_sha256 = hashlib.sha256(raw_payload).hexdigest()
         expected_sha256 = manifest.get("data_sha256")
         if expected_sha256 and expected_sha256 != actual_sha256:
             raise ValueError("SNAPSHOT_INTEGRITY_ERROR: CSV content does not match manifest SHA-256")
@@ -182,7 +181,7 @@ class FutuSnapshotService:
             "opend_version": "not_reported_by_sdk",
             **quality,
         }
-        clean.to_csv(self.root / f"{snapshot_id}.csv", index=False)
+        (self.root / f"{snapshot_id}.csv").write_bytes(payload)
         (self.root / f"{snapshot_id}.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
         return manifest
 

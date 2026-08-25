@@ -115,6 +115,25 @@ button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-v
 .page-heading p { max-width: 78ch; margin-top: 6px; color: var(--ws-text-muted); font-size: 13px; line-height: 1.6; }
 
 .panel { border-color: var(--ws-border); border-radius: var(--ws-radius-card); background: var(--ws-surface-2); box-shadow: var(--ws-shadow-1); }
+.backtest-result-shell { padding: 10px; }
+.backtest-result-frame { width: 100%; max-width: 1480px; margin-inline: auto; }
+.backtest-result-charts { width: 100%; max-width: 1120px; margin: 32px auto 0; }
+.backtest-workspace-panel { padding: 10px; }
+.backtest-workspace-stack { gap: 28px; }
+.backtest-result-content { margin-top: 28px; padding-top: 28px; }
+.backtest-result-toolbar { margin-bottom: 24px; }
+.backtest-result-analysis { margin-top: 32px; }
+.backtest-operation-legend { margin-top: 10px; }
+.backtest-signal-legend { margin-top: 24px; }
+.backtest-rule-lab { margin-top: 32px; padding-top: 32px; }
+.backtest-rule-parameters, .backtest-rule-actions { margin-top: 24px; }
+.backtest-result-frame, .backtest-workspace-panel { line-height: 1.65; }
+.backtest-result-frame .panel-heading, .backtest-workspace-panel .panel-heading { margin-bottom: 22px; }
+.backtest-result-frame .panel-heading-copy p, .backtest-workspace-panel .panel-heading-copy p,
+.backtest-result-frame p, .backtest-workspace-panel p { line-height: 1.7; }
+.backtest-result-frame th, .backtest-workspace-panel th { height: auto; padding-block: 13px; line-height: 1.45; }
+.backtest-result-frame td, .backtest-workspace-panel td { padding-block: 16px; line-height: 1.55; }
+.backtest-result-frame .panel-footnote, .backtest-workspace-panel .panel-footnote { margin-top: 20px; padding-top: 16px; }
 .panel-title { color: var(--ws-text-primary); font-size: 15px; line-height: 1.45; }
 .panel-title svg { color: var(--ws-accent-hover); }
 .panel span, .event-summary span, .metric-grid span, .muted { color: var(--ws-text-muted); }
@@ -228,6 +247,8 @@ tbody tr:hover { background: color-mix(in srgb, var(--ws-surface-3) 72%, transpa
   .workspace-header { min-height: 62px; }
   .workspace-content { min-height: calc(100dvh - 62px); }
   .terminal-page { padding: 20px 16px 32px; }
+  .backtest-result-shell, .backtest-workspace-panel { padding: 10px; }
+  .backtest-workspace-stack { gap: 22px; }
   .page-heading { margin-bottom: 18px; }
   .page-heading h1 { font-size: 22px; }
   .primary-button, .secondary-button { min-height: 40px; }
