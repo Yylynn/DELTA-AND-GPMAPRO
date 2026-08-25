@@ -26,10 +26,8 @@ import { SkillDeltaChart } from "@/components/SkillDeltaChart";
 import { MarketEvidence } from "@/components/MarketEvidence";
 import { DecisionStateCard } from "@/components/DecisionStateCard";
 import { ResearchDataset } from "@/components/ResearchDataset";
-import { CalibrationReadiness } from "@/components/CalibrationReadiness";
 import { type Snapshot } from "@/components/FutuReconciliationPanel";
-import { StrategyLab } from "@/components/StrategyLab";
-import { SignalRuleResearch } from "@/components/SignalRuleResearch";
+import { BacktestDataWorkspace } from "@/components/BacktestDataWorkspace";
 import { MarketCodeInput } from "@/components/MarketCodeInput";
 import { NewsCenter } from "@/components/NewsCenter";
 import { OptionsRadar } from "@/components/OptionsRadar";
@@ -1096,11 +1094,9 @@ function Backtest() {
     <div className="terminal-page">
       <PageHeader
         title="回测实验室"
-        description="研究 DELTA、GPMAPRO B/S 与背离的因果时序；不使用事后标记的历史高低点。"
+        description="从已导入的 CSV 或不可变 Futu 快照建立可核验数据集；信号与回测将在确认数据后运行。"
       />
-      <CalibrationReadiness />
-      <StrategyLab />
-      <SignalRuleResearch />
+      <BacktestDataWorkspace />
     </div>
   );
 }
