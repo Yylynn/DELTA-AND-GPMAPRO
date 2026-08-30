@@ -1,10 +1,13 @@
 from datetime import datetime, timedelta, timezone
+from concurrent.futures import ThreadPoolExecutor
+import time
 
 from fastapi.testclient import TestClient
 
 from app.main import app
 from app.config.news_sources import enabled_sources, source_catalog
-from app.services.news import NewsService, PublicRssNewsProvider, normalize_records, provider_symbol
+from app.services.news import NewsService, PublicRssNewsProvider, build_market_headlines, normalize_records, provider_symbol
+from app.config.news_universe import entity_terms
 from app.services.decision_engine import DecisionEngine
 
 
@@ -38,12 +41,12 @@ def test_free_source_registry_enables_only_configured_sources() -> None:
         "reuters", "bloomberg", "simuwang", "barclayhedge", "bridgewater", "morningstar",
         "eastmoney", "stcn", "10jqka", "xueqiu", "jiemian",
     }.isdisjoint(catalog)
-    assert {source.source_id for source in enabled_sources(cnbc=False)} == {"marketwatch", "wallstreetcn", "openbb_yfinance", "sec_edgar", "finnhub_company"}
+    assert {"marketwatch", "wallstreetcn", "fed_press", "treasury_press", "coindesk", "openbb_yfinance", "sec_edgar", "finnhub_company"} == {source.source_id for source in enabled_sources(cnbc=False)}
 
 
 def test_rss_parser_preserves_source_scope_and_published_time(monkeypatch) -> None:
     class Response:
-        content = b"<rss><channel><item><title>Market headline</title><link>https://example.com/news</link><pubDate>Tue, 19 Aug 2026 12:00:00 GMT</pubDate></item></channel></rss>"
+        content = b"<rss xmlns:media='http://search.yahoo.com/mrss/'><channel><item><title>Market headline</title><link>https://example.com/news</link><pubDate>Tue, 19 Aug 2026 12:00:00 GMT</pubDate><media:thumbnail url='https://example.com/image.jpg'/></item></channel></rss>"
         def raise_for_status(self): pass
     class Client:
         def __enter__(self): return self
@@ -51,8 +54,52 @@ def test_rss_parser_preserves_source_scope_and_published_time(monkeypatch) -> No
         def get(self, url): return Response()
     monkeypatch.setattr("app.services.news.httpx.Client", lambda **_: Client())
     rows, warnings = PublicRssNewsProvider(enabled_sources()).market_news(10)
-    assert not warnings and {row["source"] for row in rows} == {"CNBC", "MarketWatch", "华尔街见闻"}
+    assert not warnings and {row["source"] for row in rows} == {"CNBC", "MarketWatch", "华尔街见闻", "Federal Reserve", "U.S. Treasury", "CoinDesk"}
     assert all(row["scope"] == "MARKET" and row["date"] for row in rows)
+    assert all(row["image"] == "https://example.com/image.jpg" for row in rows)
+
+
+def test_market_headlines_are_grouped_by_source_and_combined_is_diverse() -> None:
+    items = [
+        {"id": f"w{index}", "source_id": "wallstreetcn", "published_at": f"2026-08-19T0{9-index}:00:00Z"}
+        for index in range(5)
+    ] + [
+        {"id": "c1", "source_id": "cnbc", "published_at": "2026-08-19T08:30:00Z"},
+        {"id": "m1", "source_id": "marketwatch", "published_at": "2026-08-19T08:20:00Z"},
+        {"id": "f1", "source_id": "fed_press", "published_at": "2026-08-19T08:10:00Z"},
+        {"id": "d1", "source_id": "coindesk", "published_at": "2026-08-19T08:00:00Z"},
+    ]
+    result = build_market_headlines(items, [])
+    groups = {group["id"]: group for group in result["headline_groups"]}
+    assert result["source_order"] == ["all", "wallstreetcn", "cnbc", "marketwatch", "official", "coindesk"]
+    assert [item["id"] for item in groups["wallstreetcn"]["items"]] == ["w0", "w1", "w2", "w3", "w4"]
+    assert len({item["source_id"] for item in groups["all"]["items"][:5]}) == 5
+    assert [item["id"] for item in groups["official"]["items"]] == ["f1"]
+
+
+def test_concurrent_market_refresh_fetches_upstream_once(tmp_path) -> None:
+    class SlowMacro(FakeProvider):
+        def market_news(self, limit: int):
+            self.calls += 1; time.sleep(.05)
+            return [{"title": "Macro", "date": "2026-08-19T08:00:00Z", "source": "CNBC", "scope": "MARKET"}], []
+    provider = SlowMacro(); service = NewsService(tmp_path, provider=provider, now=lambda: NOW)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _: service.get_market(refresh=True), range(2)))
+    assert provider.calls == 1
+    assert {item["source_status"] for item in results} == {"LIVE", "CACHED"}
+
+
+def test_all_market_sources_failing_preserves_last_successful_cache(tmp_path) -> None:
+    class Macro(FakeProvider):
+        def market_news(self, limit: int): return [{"title": "Cached macro", "date": "2026-08-19T08:00:00Z", "source": "CNBC", "scope": "MARKET"}], []
+    class Empty(FakeProvider):
+        def market_news(self, limit: int): return [], ["CNBC RSS 暂时不可用"]
+    service = NewsService(tmp_path, provider=Macro(), now=lambda: NOW)
+    assert service.get_market(refresh=True)["source_status"] == "LIVE"
+    service.provider = Empty(); service._last_market_refresh_monotonic = float("-inf")
+    result = service.get_market(refresh=True)
+    assert result["source_status"] == "STALE_CACHE"
+    assert result["market_items"][0]["title"] == "Cached macro"
 
 
 def test_normalize_records_dedupes_sorts_and_tolerates_missing_fields() -> None:
@@ -105,6 +152,25 @@ def test_market_news_is_separate_from_company_news_and_needs_cross_source_confir
     trace = service.insight("US.AAPL") if service.get("US.AAPL") else None
     assert trace["company"]["source_count"] == 1 and not trace["company"]["confirmation_eligible"]
     assert trace["market"]["source_count"] == 2 and trace["market"]["confirmation_eligible"]
+
+
+def test_market_stream_has_its_own_cache_and_never_becomes_company_items(tmp_path) -> None:
+    class MacroProvider(FakeProvider):
+        def market_news(self, limit: int):
+            return [{"title": "Fed policy update", "date": "2026-08-19T07:30:00Z", "source": "CNBC", "scope": "MARKET"}], []
+
+    provider = MacroProvider([])
+    service = NewsService(tmp_path, provider=provider, now=lambda: NOW)
+    first = service.get_market(); cached = service.get_market()
+    company = service.get("US.AAPL")
+    assert first["source_status"] == "LIVE" and cached["source_status"] == "CACHED"
+    assert first["market_items"][0]["scope"] == "MARKET"
+    assert company["company_items"] == [] and company["market_items"][0]["title"] == "Fed policy update"
+
+
+def test_manual_micron_query_has_entity_alias_without_expanding_snapshot_universe() -> None:
+    assert "micron technology" in entity_terms("MU")
+    assert "MU" not in __import__("app.config.news_universe", fromlist=["RESEARCH_UNIVERSE"]).RESEARCH_UNIVERSE
 
 
 def test_company_failure_never_uses_macro_rss_as_a_symbol_news_fallback(tmp_path) -> None:
@@ -201,6 +267,21 @@ def test_news_advice_api_exposes_strict_decision_contract(monkeypatch) -> None:
     assert response.status_code == 200
     assert response.json()["action"] == "HOLD"
     assert response.json()["contribution"]["points"] == 0
+
+
+def test_news_scorecard_api_is_research_only(monkeypatch) -> None:
+    import app.api.news as news_api
+
+    class Scorecard:
+        def scorecard(self, code, *, refresh=False, as_of=None):
+            return {"schema_version": 1, "research_only": True, "symbol": code, "events": [],
+                    "historical_reliability": {"status": "INSUFFICIENT_EVIDENCE"}}
+
+    monkeypatch.setattr(news_api, "scorecard_service", Scorecard())
+    response = TestClient(app).get("/api/news/US.MU/scorecard")
+    assert response.status_code == 200
+    assert response.json()["research_only"] is True
+    assert response.json()["events"] == []
 
 
 def test_adverse_news_vetoes_a_buy_but_never_creates_a_buy() -> None:

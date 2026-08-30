@@ -39,6 +39,51 @@ class ConfigurableDeltaEngine(ManualDeltaEngine):
     def from_config(cls,config:dict): return cls(config.get("events",[]))
 def _day(x): return pd.Timestamp(x).date()
 def _phase(i): return PHASE_NAMES[i%4]
+
+
+def _annotate_adjacent_window_conflicts(predictions: list[dict], boundary: dict | None) -> list[dict]:
+    """Add display-only dependency state without changing statistical windows.
+
+    DELTA's per-point standard-deviation ranges are independent estimates, so
+    adjacent ranges can overlap.  The overlap is useful uncertainty evidence,
+    not a reason to move either date.  Only the prediction immediately after
+    an unresolved live boundary becomes conditional on that boundary's
+    confirmation.
+    """
+    for index, prediction in enumerate(predictions):
+        prediction.update({
+            "overlaps_previous_window": False,
+            "overlap_start": None,
+            "overlap_end": None,
+            "previous_number": None,
+            "requires_previous_confirmation": False,
+            "conditional": False,
+            "independent_window_eligible": True,
+        })
+        if index == 0:
+            continue
+        previous = predictions[index - 1]
+        start = max(_day(prediction["window_start"]), _day(previous["window_start"]))
+        end = min(_day(prediction["window_end"]), _day(previous["window_end"]))
+        if start > end:
+            continue
+        requires_confirmation = (
+            index == 1
+            and previous.get("phase") == "current_candidate"
+            and not bool((boundary or {}).get("confirmed"))
+        )
+        prediction.update({
+            "overlaps_previous_window": True,
+            "overlap_start": start.isoformat(),
+            "overlap_end": end.isoformat(),
+            "previous_number": previous["number"],
+            "requires_previous_confirmation": requires_confirmation,
+            "conditional": requires_confirmation,
+            "independent_window_eligible": not requires_confirmation,
+        })
+    return predictions
+
+
 def fixed_cycle_grid(anchor_dates,display_dates):
     if not anchor_dates or not display_dates:return []
     out=[]
@@ -323,6 +368,7 @@ class ITDDeltaEngine:
         # The full table begins at the unresolved current boundary, then walks
         # forward one complete 1–12 sequence from that point.
         all_pred = ([current_prediction] if current_prediction else []) + following_predictions
+        _annotate_adjacent_window_conflicts(all_pred, raw[-1] if raw else None)
         pred=all_pred[:2]
         table=[]
         for n in range(1,13):

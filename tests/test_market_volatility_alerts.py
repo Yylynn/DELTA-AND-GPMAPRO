@@ -3,7 +3,7 @@ from datetime import UTC, datetime
 
 import pandas as pd
 
-from app.services.market_volatility_alerts import MARKET_INDEX_TECHNICAL_INDICATORS, MarketVolatilityAlertService
+from app.services.market_volatility_alerts import MARKET_INDEX_TECHNICAL_INDICATORS, RISK_MODULE_INDICATORS, MarketVolatilityAlertService
 
 
 def frame(previous: float, current: float) -> pd.DataFrame:
@@ -60,7 +60,7 @@ def test_stalled_public_request_returns_failure_without_blocking_ui(tmp_path):
     service = MarketVolatilityAlertService(tmp_path, fetcher=slow_fetch, fetch_timeout_seconds=.001)
     result = service.check()
     assert result["last_check"]["status"] == "FAILED"
-    assert len(result["failures"]) == 7
+    assert len(result["failures"]) == 4 + len(MARKET_INDEX_TECHNICAL_INDICATORS) + len(RISK_MODULE_INDICATORS)
     assert all("timed out" in item["error"] for item in result["failures"])
 
 
@@ -69,10 +69,30 @@ def test_cache_avoids_a_second_network_fetch_for_five_minutes(tmp_path):
     def fetch(code: str): calls.append(code); return frame(10, 10)
     service = MarketVolatilityAlertService(tmp_path, fetcher=fetch, now=lambda: datetime(2026, 8, 19, 22, tzinfo=UTC))
     assert len(service.check()["readings"]) == 4
-    assert len(calls) == 7
+    expected = 4 + len(MARKET_INDEX_TECHNICAL_INDICATORS) + len(RISK_MODULE_INDICATORS)
+    assert len(calls) == expected
     again = service.check()
-    assert len(calls) == 7
+    assert len(calls) == expected
     assert {item["source"] for item in again["readings"]} == {"CACHE"}
+
+
+def test_risk_snapshot_deduplicates_volatility_and_exposes_auditable_modules(tmp_path):
+    dates = pd.date_range("2025-01-01", periods=260, freq="B")
+    def bars(start: float, end: float) -> pd.DataFrame:
+        return pd.DataFrame({"date": dates, "close": list(pd.Series(range(260)).map(lambda i: start + (end - start) * i / 259))})
+    values = {"^VIX": bars(15, 35), "^VXN": bars(20, 40), "^VVIX": bars(80, 140), "VIXY": bars(10, 30)}
+    values.update({item["code"]: bars(100, 100) for item in MARKET_INDEX_TECHNICAL_INDICATORS + RISK_MODULE_INDICATORS})
+    service = MarketVolatilityAlertService(tmp_path, fetcher=lambda code: values[code], now=lambda: datetime(2026, 12, 1, 22, tzinfo=UTC))
+
+    first = service.check()
+    snapshot = service.snapshot()
+
+    assert first["last_check"]["status"] == "OK"
+    assert snapshot["risk_score"] > 0
+    assert len([item for item in snapshot["modules"] if item["id"] == "VOLATILITY"]) == 1
+    assert snapshot["regime"] == "CRISIS"  # one extreme volatility module is an explicit exception
+    assert snapshot["data_health"]["available_modules"] == 5
+    assert snapshot["risk_history"][-1]["risk_score"] == snapshot["risk_score"]
 
 
 def test_current_unclosed_new_york_day_is_excluded(tmp_path):
@@ -91,6 +111,28 @@ def test_yahoo_chart_response_is_parsed_without_an_api_key(monkeypatch, tmp_path
     service = MarketVolatilityAlertService(tmp_path)
     bars = service._fetch_yahoo_daily_bars("^VIX")
     assert list(bars.close) == [20.0, 21.0]
+
+
+def test_cboe_csv_supports_vvix_column_and_is_primary_volatility_source(monkeypatch, tmp_path):
+    class Response:
+        status_code = 200
+        text = "DATE,VVIX\n2026-08-17,90\n2026-08-18,95\n"
+    service = MarketVolatilityAlertService(tmp_path)
+    monkeypatch.setattr(service, "_get", lambda *args, **kwargs: Response())
+
+    bars = service._fetch_cboe_daily_bars("VVIX")
+
+    assert list(bars.close) == [90, 95]
+
+
+def test_unconfigured_keyed_providers_are_reported_without_startup_failure(tmp_path):
+    service = MarketVolatilityAlertService(tmp_path)
+    health = service.snapshot()["data_health"]["providers"]
+
+    assert health["CBOE"]["status"] == "AVAILABLE"
+    assert health["YAHOO_FINANCE"]["status"] == "FALLBACK"
+    assert health["TWELVE_DATA"]["status"] in {"AVAILABLE", "NOT_CONFIGURED"}
+    assert health["FRED"]["status"] in {"AVAILABLE", "NOT_CONFIGURED"}
 
 
 def test_all_final_gpmapro_markers_become_deduplicated_technical_alerts(monkeypatch, tmp_path):

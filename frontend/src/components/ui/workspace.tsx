@@ -46,7 +46,7 @@ export function PanelHeading({
   );
 }
 
-type MetricTone = "neutral" | "positive" | "warning" | "negative" | "info";
+type MetricTone = "neutral" | "positive" | "warning" | "negative" | "info" | "research";
 
 export function MetricCard({
   label,

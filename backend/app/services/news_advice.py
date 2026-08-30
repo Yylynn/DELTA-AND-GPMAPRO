@@ -315,6 +315,26 @@ class NewsAdviceService:
     def _market_label(regime: str) -> str:
         return {"RISK_ON": "风险偏好", "NEUTRAL": "中性", "CAUTION": "谨慎", "RISK_OFF": "风险厌恶"}.get(regime, regime)
 
+    @staticmethod
+    def _research_guidance(response: dict[str, Any]) -> dict[str, Any]:
+        """Headline-level interpretation; intentionally never changes the action layer."""
+        items = [item for item in response.get("company_items", []) if not is_generic_sec_filing(str(item.get("title") or ""))]
+        if not items:
+            return {"status": "INSUFFICIENT", "bias": "NEUTRAL", "confidence": 0.0,
+                    "summary": "没有可用于研究级解读的具体公司事件。", "catalysts": [], "risks": [],
+                    "limitations": ["缺少可追溯的具体公司新闻，严格行动建议保持观望。"]}
+        scored = [(item, float(item.get("analysis", {}).get("sentiment_score", 0))) for item in items]
+        score = sum(value for _, value in scored) / len(scored)
+        bias = "BULLISH" if score >= .12 else "BEARISH" if score <= -.12 else "NEUTRAL"
+        methods = {str(item.get("analysis", {}).get("method")) for item, _ in scored}
+        limitations = []
+        if "FINBERT" not in methods: limitations.append("当前为标题级规则解读，尚无可用 FinBERT 方向证据。")
+        if len({item.get("source_id") for item, _ in scored}) < 2: limitations.append("仅有单一来源或单一事件，尚未形成交叉确认。")
+        return {"status": "RESEARCH", "bias": bias, "confidence": round(min(.70, .22 + .12 * len(items) + .12 * len({item.get('source_id') for item, _ in scored})), 3),
+                "summary": "研究级解读仅用于识别催化剂与风险，不改变严格行动建议或总览分。",
+                "catalysts": [item["title"] for item, value in scored if value >= .12][:3],
+                "risks": [item["title"] for item, value in scored if value <= -.12][:3], "limitations": limitations}
+
     def advice(self, code: str, *, refresh: bool = False, as_of: str | None = None, response: dict[str, Any] | None = None) -> dict[str, Any]:
         if response is None:
             response = self.news.get_at(code, as_of, limit=100) if as_of else self.news.get(code, limit=100, refresh=refresh)
@@ -414,6 +434,7 @@ class NewsAdviceService:
                 "points": contribution_points,
                 "effect": effect,
             },
+            "research_guidance": self._research_guidance(response),
             "key_reasons": key_reasons,
             "risk_flags": risk_flags,
             "events": events,

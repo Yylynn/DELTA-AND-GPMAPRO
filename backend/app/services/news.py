@@ -7,6 +7,7 @@ from hashlib import sha1
 import json
 from pathlib import Path
 import re
+from threading import Lock
 import time
 from typing import Any, Callable, Protocol
 from xml.etree import ElementTree
@@ -21,22 +22,88 @@ from app.services.news_analysis import NewsAnalyzer, freshness_weight
 from app.services.trading_calendar import earliest_trade_at
 
 
+MARKET_HEADLINE_SOURCES = (
+    {"id": "all", "label": "全部头条", "source_ids": ("wallstreetcn", "cnbc", "marketwatch", "fed_press", "treasury_press", "coindesk")},
+    {"id": "wallstreetcn", "label": "华尔街见闻", "source_ids": ("wallstreetcn",)},
+    {"id": "cnbc", "label": "CNBC", "source_ids": ("cnbc",)},
+    {"id": "marketwatch", "label": "MarketWatch", "source_ids": ("marketwatch",)},
+    {"id": "official", "label": "官方发布", "source_ids": ("fed_press", "treasury_press")},
+    {"id": "coindesk", "label": "CoinDesk", "source_ids": ("coindesk",)},
+)
+
+
+def _published_key(item: dict[str, Any]) -> str:
+    return str(item.get("published_at") or "")
+
+
+def build_market_headlines(items: list[dict[str, Any]], health: list[dict[str, Any]]) -> dict[str, Any]:
+    """Build stable source tabs and a source-diverse combined headline order."""
+    ordered = sorted(items, key=_published_key, reverse=True)
+    health_by_id = {str(item.get("source_id")): item for item in health}
+    groups = []
+    for definition in MARKET_HEADLINE_SOURCES:
+        source_ids = tuple(definition["source_ids"])
+        matching = [item for item in ordered if item.get("source_id") in source_ids]
+        if definition["id"] == "all" and matching:
+            picked, seen_ids = [matching[0]], {matching[0].get("id")}
+            latest_by_source = []
+            for source_id in source_ids:
+                if source_id == matching[0].get("source_id"): continue
+                candidate = next((item for item in matching if item.get("source_id") == source_id and item.get("id") not in seen_ids), None)
+                if candidate: latest_by_source.append(candidate)
+            for item in sorted(latest_by_source, key=_published_key, reverse=True):
+                if len(picked) >= 5: break
+                picked.append(item); seen_ids.add(item.get("id"))
+            matching = picked + [item for item in matching if item.get("id") not in seen_ids]
+        available = bool(matching) or any(health_by_id.get(source_id, {}).get("availability") == "AVAILABLE" for source_id in source_ids)
+        groups.append({"id": definition["id"], "label": definition["label"], "source_ids": list(source_ids), "available": available, "count": len(matching), "items": matching})
+    return {"source_order": [item["id"] for item in MARKET_HEADLINE_SOURCES], "headline_groups": groups}
+
+
 class NewsProvider(Protocol):
     def company_news(self, symbol: str, limit: int) -> list[dict[str, Any]]: ...
 
 
 class OpenBBNewsProvider:
     def company_news(self, symbol: str, limit: int) -> list[dict[str, Any]]:
-        from openbb import obb
-        result = obb.news.company(symbol=symbol, limit=limit)
+        try:
+            from openbb import obb
+            result = obb.news.company(symbol=symbol, limit=limit)
+            raw_items = result.results
+            provider_name = result.provider or "yfinance"
+        except Exception:
+            raw_items = []
+            provider_name = "yfinance"
         rows = []
-        for item in result.results:
+        for item in raw_items:
             raw = item.model_dump() if hasattr(item, "model_dump") else dict(item)
             rows.append({
                 "id": raw.get("id"), "title": raw.get("title"), "url": raw.get("url"),
                 "date": raw.get("date"), "summary": raw.get("summary") or raw.get("excerpt"),
-                "publisher": raw.get("source") or "Unknown publisher", "provider": result.provider or "yfinance",
+                "publisher": raw.get("source") or "Unknown publisher", "provider": provider_name,
                 "scope": "COMPANY", "source_id": "openbb_yfinance", "entity_tickers": [symbol.upper()],
+            })
+        if rows:
+            return rows
+        # OpenBB's yfinance adapter sometimes reports an Empty error although the
+        # underlying yfinance feed is available.  Keep this within the approved
+        # OpenBB/yfinance source rather than silently substituting a new vendor.
+        try:
+            import yfinance as yf
+            raw_news = yf.Ticker(symbol).news or []
+        except Exception as error:
+            raise RuntimeError(f"OpenBB/yfinance 均未返回数据：{error}") from error
+        for item in raw_news[:limit]:
+            content = item.get("content", item) if isinstance(item, dict) else {}
+            if not isinstance(content, dict):
+                continue
+            rows.append({
+                "id": content.get("id") or item.get("id"), "title": content.get("title") or item.get("title"),
+                "url": content.get("canonicalUrl", {}).get("url") if isinstance(content.get("canonicalUrl"), dict) else content.get("url") or item.get("link"),
+                "date": content.get("pubDate") or content.get("displayTime") or item.get("providerPublishTime"),
+                "summary": content.get("summary") or item.get("summary"),
+                "publisher": (content.get("provider") or {}).get("displayName") if isinstance(content.get("provider"), dict) else content.get("publisher") or "yfinance",
+                "provider": "yfinance", "scope": "COMPANY", "source_id": "openbb_yfinance", "entity_tickers": [symbol.upper()],
             })
         return rows
 
@@ -75,10 +142,20 @@ class SecEdgarNewsProvider:
 
     def company_news(self, symbol: str, limit: int) -> list[dict[str, Any]]:
         headers = {"User-Agent": self.user_agent, "Accept-Encoding": "gzip, deflate"}
-        with httpx.Client(timeout=self.timeout_seconds, follow_redirects=True, headers=headers) as client:
-            cik = self._cik(client, symbol)
-            if cik is None: return []
-            response = client.get(f"https://data.sec.gov/submissions/CIK{cik:010d}.json"); response.raise_for_status(); payload = response.json()
+        payload = None
+        last_error: Exception | None = None
+        for attempt in range(3):
+            try:
+                with httpx.Client(timeout=self.timeout_seconds, follow_redirects=True, headers=headers) as client:
+                    cik = self._cik(client, symbol)
+                    if cik is None: return []
+                    response = client.get(f"https://data.sec.gov/submissions/CIK{cik:010d}.json"); response.raise_for_status(); payload = response.json()
+                break
+            except httpx.HTTPError as error:
+                last_error = error
+                if attempt < 2: time.sleep(.25 * (attempt + 1))
+        if payload is None:
+            raise RuntimeError(f"SEC 请求失败：{last_error}") from last_error
         recent = payload.get("filings", {}).get("recent", {}); rows = []; form4_count = 0
         for index, form in enumerate(recent.get("form", [])):
             base_form = str(form).removesuffix("/A")
@@ -116,6 +193,23 @@ class PublicRssNewsProvider:
                 return found.text.strip()
         return None
 
+    @staticmethod
+    def _image(item: ElementTree.Element) -> str | None:
+        """Read publisher-provided RSS media only; never visit article pages."""
+        names = (
+            "{http://search.yahoo.com/mrss/}thumbnail",
+            "{http://search.yahoo.com/mrss/}content",
+            "enclosure",
+        )
+        for name in names:
+            node = item.find(name)
+            if node is None: continue
+            url = str(node.attrib.get("url") or "").strip()
+            media_type = str(node.attrib.get("type") or "")
+            if url and (name != "enclosure" or not media_type or media_type.startswith("image/")):
+                return url
+        return None
+
     def _fetch_one(self, source: NewsSource, limit: int) -> tuple[list[dict[str, Any]], str | None]:
         error_text = None
         for attempt in range(3):
@@ -129,7 +223,7 @@ class PublicRssNewsProvider:
                 for item in root.findall(".//item")[:limit]:
                     title = self._text(item, "title")
                     if title:
-                        rows.append({"title": title, "url": self._text(item, "link"), "date": self._text(item, "pubDate", "{http://purl.org/dc/elements/1.1/}date"), "publisher": source.display_name, "provider": "rss", "source": source.display_name, "source_id": source.source_id, "scope": "MARKET"})
+                        rows.append({"title": title, "url": self._text(item, "link"), "date": self._text(item, "pubDate", "{http://purl.org/dc/elements/1.1/}date"), "summary": self._text(item, "description", "{http://purl.org/rss/1.0/modules/content/}encoded"), "image": self._image(item), "publisher": source.display_name, "provider": "rss", "source": source.display_name, "source_id": source.source_id, "scope": "MARKET"})
                 self.health(source_id=source.source_id, status="OK", error=None)
                 return rows, None
             except (httpx.HTTPError, ElementTree.ParseError, ValueError) as error:
@@ -160,7 +254,9 @@ class DefaultNewsProvider:
         configured = {source.source_id for source in sources}
         candidates = [("openbb_yfinance", OpenBBNewsProvider())]
         if "sec_edgar" in configured: candidates.append(("sec_edgar", SecEdgarNewsProvider(sec_user_agent, timeout_seconds)))
-        if "finnhub_company" in configured: candidates.append(("finnhub_company", FinnhubCompanyNewsProvider(finnhub_api_key, timeout_seconds)))
+        if "finnhub_company" in configured and finnhub_api_key.strip(): candidates.append(("finnhub_company", FinnhubCompanyNewsProvider(finnhub_api_key, timeout_seconds)))
+        elif "finnhub_company" in configured:
+            self.health(source_id="finnhub_company", status="NOT_CONFIGURED", error="未配置 DELTA_FINNHUB_API_KEY；该备用源不会参与本次抓取。")
         self.company_providers = [(key, provider) for key, provider in candidates if key in configured]
 
     def company_news(self, symbol: str, limit: int) -> list[dict[str, Any]]:
@@ -170,7 +266,9 @@ class DefaultNewsProvider:
             for future in as_completed(futures):
                 source_id = futures[future]
                 try:
-                    rows.extend(future.result()); self.health(source_id=source_id, status="OK", error=None)
+                    found = future.result()
+                    rows.extend(found)
+                    self.health(source_id=source_id, status="OK" if found else "NO_DATA", error=None if found else "未返回近期公司新闻。")
                 except Exception as error:
                     self.health(source_id=source_id, status="DEGRADED", error=str(error) or type(error).__name__)
         return rows
@@ -195,7 +293,7 @@ def provider_symbol(code: str) -> str:
 def _timestamp(value: Any) -> str | None:
     if value is None or (isinstance(value, float) and pd.isna(value)): return None
     try:
-        stamp = pd.Timestamp(value)
+        stamp = pd.Timestamp(value, unit="s") if isinstance(value, (int, float)) else pd.Timestamp(value)
         return (stamp.tz_localize("UTC") if stamp.tzinfo is None else stamp).isoformat()
     except (TypeError, ValueError): return None
 
@@ -230,17 +328,22 @@ class NewsService:
         }
         self.provider = provider or DefaultNewsProvider(self.sources, rss_timeout_seconds, self._mark_health, finnhub_api_key=finnhub_api_key, sec_user_agent=sec_user_agent)
         self._now, self.analyzer = now or (lambda: datetime.now(timezone.utc)), NewsAnalyzer()
+        self._market_refresh_lock = Lock()
+        self._last_market_refresh_monotonic = float("-inf")
 
     def _mark_health(self, *, source_id: str, status: str, error: str | None) -> None:
         item = self.health.setdefault(source_id, {"source_id": source_id, "display_name": source_id, "status": "UNKNOWN", "availability": "NOT_CHECKED", "availability_reason": "尚未检查。", "last_success_at": None, "last_error": None, "consecutive_failures": 0})
         item["status"] = status
         if status == "OK": item.update(availability="AVAILABLE", availability_reason=None, last_success_at=self._now().isoformat(), last_error=None, consecutive_failures=0)
+        elif status == "NO_DATA": item.update(availability="NO_DATA", availability_reason=error or "未返回近期新闻。", last_error=None, consecutive_failures=0)
+        elif status == "NOT_CONFIGURED": item.update(availability="NOT_CONFIGURED", availability_reason=error or "来源尚未配置。", last_error=None, consecutive_failures=0)
         else: item.update(availability="UNAVAILABLE", availability_reason=error or "来源未返回可用响应。", last_error=error, consecutive_failures=int(item.get("consecutive_failures", 0)) + 1)
 
     def source_health(self) -> list[dict[str, Any]]:
         return [self.health[source.source_id].copy() for source in self.sources]
 
     def _path(self, code: str) -> Path: return self.cache_dir / f"{code.replace('.', '_')}.json"
+    def _market_path(self) -> Path: return self.cache_dir / "MARKET.json"
     def _read_cache(self, code: str) -> dict[str, Any] | None:
         try:
             data = json.loads(self._path(code).read_text(encoding="utf-8"))
@@ -255,6 +358,59 @@ class NewsService:
         try:
             fetched = datetime.fromisoformat(str(cached["fetched_at"]).replace("Z", "+00:00")); return self._now() - (fetched if fetched.tzinfo else fetched.replace(tzinfo=timezone.utc)) <= self.ttl
         except (TypeError, ValueError): return False
+    def _market_response(self, payload: dict[str, Any], status: str, is_cached: bool, warning: str | None, limit: int) -> dict[str, Any]:
+        market_items = payload.get("market_items", [])[:limit]
+        headlines = build_market_headlines(market_items, self.source_health())
+        return {"market_items": market_items, "source_status": status,
+                "fetched_at": payload.get("fetched_at"), "is_cached": is_cached, "warning": warning,
+                "source_warnings": payload.get("source_warnings", []), "source_health": self.source_health(), **headlines}
+
+    def get_market(self, *, limit: int = 20, refresh: bool = False) -> dict[str, Any]:
+        """Read the global macro stream without coupling it to a selected ticker."""
+        if not 1 <= limit <= 100: raise NewsError("limit 必须介于 1 到 100")
+        try:
+            cached = json.loads(self._market_path().read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            cached = None
+        if cached and cached.get("fetched_at") and not refresh and self._fresh(cached):
+            return self._market_response(cached, "CACHED", True, None, limit)
+        observed_fetched_at = cached.get("fetched_at") if cached else None
+        with self._market_refresh_lock:
+            try: current = json.loads(self._market_path().read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError): current = None
+            if current and current.get("fetched_at") != observed_fetched_at:
+                return self._market_response(current, "CACHED", True, None, limit)
+            if current and refresh and time.monotonic() - self._last_market_refresh_monotonic < 5:
+                return self._market_response(current, "CACHED", True, None, limit)
+            if current and not refresh and self._fresh(current):
+                return self._market_response(current, "CACHED", True, None, limit)
+            try:
+                rows, warnings = self.provider.market_news(max(100, limit))
+            except Exception as error:
+                fallback = current or cached
+                if fallback: return self._market_response(fallback, "STALE_CACHE", True, "宏观新闻源暂时不可用，正在展示最近缓存数据。", limit)
+                return self._market_response({}, "UNAVAILABLE", False, f"宏观新闻源暂时不可用：{error}", limit)
+            if not rows and (current or cached):
+                fallback = current or cached
+                warning = "；".join(warnings) or "全部宏观新闻源本次均未返回数据。"
+                return self._market_response(fallback, "STALE_CACHE", True, f"{warning} 正在展示最近缓存数据。", limit)
+            items: list[dict[str, Any]] = []
+            allowed = {source.source_id for source in self.sources}
+            for item in normalize_records(rows, "MARKET"):
+                source = next((candidate for candidate in self.sources if candidate.source_id == item.get("source_id")), None) or resolve_source(item["publisher"])
+                if not source or source.source_id not in allowed or source.scope != "MARKET": continue
+                raw_summary = item["summary"]
+                item.update(source_id=source.source_id, source=source.display_name, license_status=source.authorization, allow_summary=source.allow_summary, entity_status="ACCEPTED", entity_matches=[], scope="MARKET")
+                item["summary"] = raw_summary if source.allow_summary else None
+                item["analysis"] = self.analyzer.analyze(item["title"], raw_summary, item.get("event_type_hint"))
+                item["language"] = item["analysis"]["language"]
+                item["earliest_trade_at"] = None; item["factor_eligible"] = False
+                items.append(item)
+            payload = {"fetched_at": self._now().isoformat(), "market_items": items, "source_warnings": warnings}
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
+            self._market_path().write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            self._last_market_refresh_monotonic = time.monotonic()
+            return self._market_response(payload, "LIVE" if items else "NO_DATA", False, "；".join(warnings) if warnings else None, limit)
     def _response(self, payload: dict[str, Any], status: str, is_cached: bool, warning: str | None, limit: int) -> dict[str, Any]:
         # `items` remains the company-only compatibility field used by factor snapshots.
         if "company_items" in payload:
@@ -280,10 +436,10 @@ class NewsService:
         except Exception as error:
             company_error = error
             if not isinstance(self.provider, DefaultNewsProvider): self._mark_health(source_id="openbb_yfinance", status="DEGRADED", error=str(error))
-        fetch_market = getattr(self.provider, "market_news", None)
-        if callable(fetch_market):
-            try: market_rows, market_warnings = fetch_market(max(100, limit)); warnings.extend(market_warnings)
-            except Exception as error: market_errors.append(error)
+        market_result = self.get_market(limit=max(100, limit), refresh=refresh)
+        market_rows = market_result.get("market_items", [])
+        warnings.extend(market_result.get("source_warnings", []))
+        if market_result.get("source_status") == "UNAVAILABLE": market_errors.append(RuntimeError(market_result.get("warning") or "宏观新闻不可用"))
         if not company_rows and not market_rows and (company_error or market_errors):
             if cached: return self._response(cached, "STALE_CACHE", True, "新闻源暂时不可用，正在展示最近缓存数据。", limit)
             failure = company_error or market_errors[0]
@@ -310,7 +466,7 @@ class NewsService:
         payload = {"symbol": normalized_code, "provider_symbol": symbol, "fetched_at": self._now().isoformat(), "items": company_items, "company_items": company_items, "market_items": market_items, "dropped_unapproved_sources": sorted(dropped), "source_warnings": warnings}
         self._write_cache(normalized_code, payload); self._write_history(normalized_code, payload)
         company_health = [item for item in self.source_health() if item.get("scope") == "COMPANY"]
-        all_company_unavailable = bool(company_health) and all(item.get("availability") == "UNAVAILABLE" for item in company_health)
+        all_company_unavailable = bool(company_health) and all(item.get("availability") in {"UNAVAILABLE", "NOT_CONFIGURED"} for item in company_health)
         if company_error:
             status, warning = "COMPANY_UNAVAILABLE", f"公司新闻源不可用：{str(company_error) or '请稍后重试'}。宏观新闻仅在下方“宏观新闻”区域展示，不会代替 {symbol} 的公司新闻。"
         elif all_company_unavailable:

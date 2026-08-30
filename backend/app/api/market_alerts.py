@@ -21,5 +21,8 @@ def update_config(request: AlertConfigRequest):
 @router.post("/market-volatility-alerts/check")
 def check(): return alerts.check()
 
+@router.post("/market-volatility-alerts/providers/check")
+def check_providers(): return alerts.check_providers()
+
 @router.post("/market-volatility-alerts/read")
 def mark_read(): return alerts.mark_read()

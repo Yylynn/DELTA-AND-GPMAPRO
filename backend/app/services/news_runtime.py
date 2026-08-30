@@ -12,6 +12,9 @@ from app.services.news_advice import NewsAdviceService
 from app.services.news_factor import NewsFactorService
 from app.services.news_factor_evaluation import NewsFactorEvaluationService
 from app.services.news_research import NewsResearchService
+from app.services.market_event_radar import MarketEventRadarService
+from app.services.news_scorecard import NewsImpactScorecardService
+from app.services.news_translation import HeadlineTranslator
 
 
 DATA_ROOT = Path(__file__).resolve().parents[3] / "data"
@@ -48,3 +51,18 @@ def get_news_factor_service() -> NewsFactorService:
 @lru_cache
 def get_news_advice_service() -> NewsAdviceService:
     return NewsAdviceService(get_news_service(), get_news_evaluation_service(), get_news_research_service(), DATA_ROOT / "news_factor_snapshots")
+
+
+@lru_cache
+def get_news_scorecard_service() -> NewsImpactScorecardService:
+    return NewsImpactScorecardService(get_news_service(), get_news_advice_service(), get_news_evaluation_service(), DATA_ROOT / "imported")
+
+
+@lru_cache
+def get_market_event_radar_service() -> MarketEventRadarService:
+    return MarketEventRadarService(
+        get_news_service(),
+        MarketVolatilityAlertService(),
+        DATA_ROOT,
+        HeadlineTranslator(DATA_ROOT / "news_cache" / "headline_translations_zh.json"),
+    )

@@ -116,11 +116,21 @@ export function SkillDeltaChart({
   analysis,
   gpma = [],
   focusDate,
+  showReversal = true,
+  compact = false,
+  mode,
+  analysisLoading = false,
+  analysisError,
 }: {
   bars: ChartBar[];
   analysis?: DeltaAnalysis;
   gpma?: GpmaSeries[];
   focusDate?: string;
+  showReversal?: boolean;
+  compact?: boolean;
+  mode?: "overview" | "research";
+  analysisLoading?: boolean;
+  analysisError?: string;
 }) {
   const client = useQueryClient();
   // QueryClient itself is stable and does not cause a render when a query
@@ -215,7 +225,7 @@ export function SkillDeltaChart({
   }));
   return (
     <>
-      <ReversalPanel analysis={analysis} />
+      {showReversal && <ReversalPanel analysis={analysis} />}
       <TerminalChart
         bars={bars}
         gpma={matchedGpma}
@@ -223,6 +233,10 @@ export function SkillDeltaChart({
         deltaWindows={windows}
         deltaAnalysis={analysis}
         focusDate={focusDate}
+        compact={compact}
+        mode={mode}
+        deltaAnalysisLoading={analysisLoading}
+        deltaAnalysisError={analysisError}
       />
     </>
   );

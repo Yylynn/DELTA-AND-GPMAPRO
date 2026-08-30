@@ -7,7 +7,7 @@ import {
   LineStyle,
   createChart,
 } from "lightweight-charts";
-import { Layers3, Type } from "lucide-react";
+import { Expand, Layers3, Shrink, Type } from "lucide-react";
 
 export type ChartLayer = "delta" | "gpmapro" | "gpma2";
 export type ChartBar = {
@@ -27,6 +27,7 @@ export type DeltaWindow = {
   confirmed?: boolean;
 };
 export type DeltaAnalysis = {
+  status?: string;
   timeframe?: "1d" | "1w" | "1mo";
   grid_lines?: Array<{
     id: string;
@@ -59,6 +60,13 @@ export type DeltaAnalysis = {
     min_gap_earliest_date?: string;
     constraint_applied?: boolean;
     candidate_window_rebased?: boolean;
+    overlaps_previous_window?: boolean;
+    overlap_start?: string | null;
+    overlap_end?: string | null;
+    previous_number?: number | null;
+    requires_previous_confirmation?: boolean;
+    conditional?: boolean;
+    independent_window_eligible?: boolean;
   }>;
   boundary_point?: {
     id: string;
@@ -80,6 +88,13 @@ export type DeltaAnalysis = {
       hi_date: string;
       constraint_applied?: boolean;
       candidate_window_rebased?: boolean;
+      overlaps_previous_window?: boolean;
+      overlap_start?: string | null;
+      overlap_end?: string | null;
+      previous_number?: number | null;
+      requires_previous_confirmation?: boolean;
+      conditional?: boolean;
+      independent_window_eligible?: boolean;
     } | null;
   }>;
   reversal?: {
@@ -464,6 +479,10 @@ export function TerminalChart({
   gpma2 = [],
   layer = "gpmapro",
   focusDate,
+  compact = false,
+  mode,
+  deltaAnalysisLoading = false,
+  deltaAnalysisError,
 }: {
   bars: ChartBar[];
   deltaWindows?: DeltaWindow[];
@@ -472,12 +491,45 @@ export function TerminalChart({
   gpma2?: GpmaSeries[];
   layer?: ChartLayer;
   focusDate?: string;
+  /** Keeps the full chart interaction but uses the overview command-center height. */
+  compact?: boolean;
+  /** Controls chart height while keeping DELTA forecasts visible in both modes. */
+  mode?: "overview" | "research";
+  deltaAnalysisLoading?: boolean;
+  deltaAnalysisError?: string;
 }) {
   const host = useRef<HTMLDivElement>(null);
   const [selectedLayer, setSelectedLayer] = useState<ChartLayer>(layer);
   const [overlays, setOverlays] = useState<OverlayPosition[]>([]);
   const [deltaOverlays, setDeltaOverlays] = useState<DeltaOverlay[]>([]);
   const [chartError, setChartError] = useState<string | null>(null);
+  const [isFocusOpen, setIsFocusOpen] = useState(false);
+  const [viewportHeight, setViewportHeight] = useState(() =>
+    typeof window === "undefined" ? 900 : window.innerHeight,
+  );
+  const chartMode = mode ?? (compact ? "overview" : "research");
+  const chartHeight = isFocusOpen
+    ? Math.max(420, viewportHeight - 126)
+    : chartMode === "overview"
+      ? 410
+      : 560;
+
+  useEffect(() => {
+    if (!isFocusOpen) return;
+    const previousOverflow = document.body.style.overflow;
+    const onResize = () => setViewportHeight(window.innerHeight);
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setIsFocusOpen(false);
+    };
+    document.body.style.overflow = "hidden";
+    window.addEventListener("resize", onResize);
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener("resize", onResize);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [isFocusOpen]);
 
   useEffect(() => {
     if (!host.current || !bars.length) {
@@ -521,7 +573,7 @@ export function TerminalChart({
     try {
       chart = createChart(host.current, {
         width: host.current.clientWidth,
-        height: 560,
+        height: chartHeight,
         layout: {
           background: { type: ColorType.Solid, color: chartTheme.canvas },
           textColor: chartTheme.text,
@@ -719,14 +771,14 @@ export function TerminalChart({
               x < -32 ||
               x > (host.current?.clientWidth ?? 0) + 32 ||
               y < -28 ||
-              y > 588
+              y > chartHeight + 28
             )
               return [];
             return [{ ...item, x, y, compact }];
           });
           const folded = foldDenseGpmaText(visible);
           const positions = new Map(
-            arrangeAnnotations(folded.map(overlayLayoutItem)).map((item) => [
+            arrangeAnnotations(folded.map(overlayLayoutItem), [], chartHeight).map((item) => [
               item.id,
               item,
             ]),
@@ -837,7 +889,7 @@ export function TerminalChart({
           const top =
             item.kind === "point"
               ? item.color === "#dc2626"
-              : (item.y ?? 0) < 280;
+              : (item.y ?? 0) < chartHeight / 2;
           const centerY =
             item.kind === "point"
               ? (item.y ?? 0) + (item.labelOffsetY ?? (top ? -9 : 15))
@@ -856,7 +908,7 @@ export function TerminalChart({
           ];
         });
         const deltaPositions = new Map(
-          arrangeAnnotations(deltaLabels, reserved).map((item) => [
+          arrangeAnnotations(deltaLabels, reserved, chartHeight).map((item) => [
             item.id,
             item,
           ]),
@@ -947,6 +999,7 @@ export function TerminalChart({
     gpma2,
     selectedLayer,
     focusDate,
+    chartHeight,
   ]);
 
   const modes: Array<[ChartLayer, string]> = [
@@ -955,7 +1008,10 @@ export function TerminalChart({
     ["delta", "仅 DELTA"],
   ];
   return (
-    <section className="chart-panel">
+    <section
+      className={`chart-panel${chartMode === "overview" ? " chart-panel-compact" : ""}${isFocusOpen ? " chart-panel-focus" : ""}`}
+      aria-label={isFocusOpen ? "走势图专注模式" : "走势图"}
+    >
       <div className="chart-toolbar">
         <div className="chart-title">
           <Layers3 size={15} strokeWidth={1.6} />
@@ -968,23 +1024,38 @@ export function TerminalChart({
           </span>
           <small>同一 OHLCV 快照与时间轴</small>
         </div>
-        <div className="chart-modes">
-          {modes.map(([value, label]) => (
+        <div className="chart-toolbar-controls">
+          <div className="chart-modes">
+            {modes.map(([value, label]) => (
+              <button
+                key={value}
+                onClick={() => setSelectedLayer(value)}
+                className={selectedLayer === value ? "active" : ""}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          {chartMode === "overview" && (
             <button
-              key={value}
-              onClick={() => setSelectedLayer(value)}
-              className={selectedLayer === value ? "active" : ""}
+              className="chart-focus-button"
+              type="button"
+              onClick={() => setIsFocusOpen((open) => !open)}
+              aria-label={isFocusOpen ? "退出全屏走势" : "打开全屏走势"}
+              title={isFocusOpen ? "退出全屏走势（Esc）" : "全屏走势"}
             >
-              {label}
+              {isFocusOpen ? <Shrink size={15} /> : <Expand size={15} />}
+              <span>{isFocusOpen ? "退出全屏" : "全屏走势"}</span>
             </button>
-          ))}
+          )}
         </div>
       </div>
       <div className="relative">
-        <div ref={host} className="h-[560px] w-full" />
+        <div ref={host} className="w-full" style={{ height: chartHeight }} />
         {chartError && <div className="chart-error">{chartError}</div>}
         <svg
-          className="pointer-events-none absolute inset-0 z-10 h-[560px] w-full overflow-visible"
+          className="pointer-events-none absolute inset-0 z-10 w-full overflow-visible"
+          style={{ height: chartHeight }}
           aria-label="GPMAPRO 与 DELTA 图层"
         >
           {overlays.map((item) => (
@@ -997,7 +1068,7 @@ export function TerminalChart({
                   x1={item.x}
                   x2={item.x}
                   y1="0"
-                  y2="560"
+                  y2={chartHeight}
                   stroke={item.color}
                   strokeWidth={item.kind === "boundary" ? 1.4 : 1.2}
                   strokeDasharray={item.dashed ? "4 5" : undefined}
@@ -1082,13 +1153,19 @@ export function TerminalChart({
           </>
         )}
       </div>
-      {(deltaAnalysis?.transition_table ?? []).length > 0 && (
+      {(deltaAnalysis?.transition_table ?? []).length > 0 ? (
         <DeltaTransitionTable
           rows={deltaAnalysis!.transition_table!}
           activeNumbers={(deltaAnalysis?.future_predictions ?? [])
             .slice(0, 2)
             .map((item) => item.number)}
           minGapTradingDays={deltaAnalysis?.min_gap_trading_days ?? 8}
+        />
+      ) : (
+        <DeltaForecastEmptyState
+          loading={deltaAnalysisLoading}
+          error={deltaAnalysisError}
+          status={deltaAnalysis?.status}
         />
       )}
       {selectedLayer !== "gpmapro" && (
@@ -1097,6 +1174,30 @@ export function TerminalChart({
           <small>虚线紫圈为 IBP；仅在确认日后生效。</small>
         </div>
       )}
+    </section>
+  );
+}
+
+function DeltaForecastEmptyState({
+  loading,
+  error,
+  status,
+}: {
+  loading: boolean;
+  error?: string;
+  status?: string;
+}) {
+  const message = loading
+    ? "正在计算当前快照的 DELTA 转移与预测日期。"
+    : error
+      ? `DELTA 预测暂不可用：${error}`
+      : status === "INSUFFICIENT_HISTORY"
+        ? "历史数据不足，至少需要 118 根有效 K 线才能生成 DELTA 预测。"
+        : "当前快照尚未形成可展示的 DELTA 预测日期。";
+  return (
+    <section className="delta-forecast-empty" aria-live="polite">
+      <h3>DELTA 编号转移与下次出现预测</h3>
+      <p>{message}</p>
     </section>
   );
 }
@@ -1120,7 +1221,7 @@ function DeltaTransitionTable({
         </h3>
         <p className="max-w-5xl text-xs leading-5 text-zinc-400">
           日期按该股票历史转移间隔均值 ± 1σ 链式推演。相邻编号至少{" "}
-          {minGapTradingDays} 个交易日；† 表示下限后移，‡
+          {minGapTradingDays} 个交易日；统计日期范围可以重叠，重叠不表示两个实际转折点同时发生。† 表示下限后移，‡
           表示当前候选已按实际边界更新。
         </p>
       </div>
@@ -1129,31 +1230,61 @@ function DeltaTransitionTable({
           <thead className="bg-[#242424] text-zinc-300">
             <tr>
               <th className="border border-zinc-700 px-3 py-2">目标数字</th>
+              <th className="border border-zinc-700 px-3 py-2">
+                预测下次出现（日期范围）
+              </th>
               <th className="border border-zinc-700 px-3 py-2">样本数 n</th>
               <th className="border border-zinc-700 px-3 py-2">平均间隔(天)</th>
               <th className="border border-zinc-700 px-3 py-2">±1σ</th>
               <th className="border border-zinc-700 px-3 py-2">最近一次(天)</th>
-              <th className="border border-zinc-700 px-3 py-2">
-                预测下次出现（日期范围）
-              </th>
             </tr>
           </thead>
           <tbody>
             {rows.map((row) => {
               const active = activeNumbers.includes(row.number);
               const prediction = row.prediction;
+              const conditional = prediction?.conditional === true;
               return (
                 <tr
                   key={row.number}
                   className={
-                    active ? "bg-[#40391f] text-[#f2e7bd]" : "bg-zinc-900"
+                    conditional
+                      ? "bg-amber-950/40 text-amber-100"
+                      : active
+                        ? "bg-[#40391f] text-[#f2e7bd]"
+                        : "bg-zinc-900"
                   }
                 >
                   <td
-                    className={`border border-zinc-800 px-3 py-2 font-semibold ${active ? "text-amber-200" : ""}`}
+                    className={`sticky left-0 border border-zinc-800 bg-inherit px-3 py-2 font-semibold ${active && !conditional ? "text-amber-200" : ""}`}
                   >
                     {row.number}
                     {active && row.number === activeNumbers[0] ? "?" : ""}
+                  </td>
+                  <td
+                    className={`border border-zinc-800 px-3 py-2 font-semibold ${conditional ? "text-amber-200" : active ? "text-[#f5b7b8]" : "text-rose-300"}`}
+                  >
+                    {prediction ? (
+                      <>
+                        {prediction.lo_date} ～ {prediction.hi_date}
+                        {prediction.constraint_applied ? " †" : ""}
+                        {prediction.candidate_window_rebased ? " ‡" : ""}
+                        {prediction.overlaps_previous_window && (
+                          <span className="mt-1 block text-[11px] font-normal leading-4 text-amber-200">
+                            ⚠ 与 #{prediction.previous_number} 时间窗重叠
+                            {prediction.overlap_start && prediction.overlap_end
+                              ? `（${prediction.overlap_start} ～ ${prediction.overlap_end}）`
+                              : ""}
+                            {prediction.requires_previous_confirmation
+                              ? "；条件预测，待前序点确认"
+                              : "；保留为统计区间"
+                            }
+                          </span>
+                        )}
+                      </>
+                    ) : (
+                      "—"
+                    )}
                   </td>
                   <td className="border border-zinc-800 px-3 py-2">
                     {row.sample_count}
@@ -1166,19 +1297,6 @@ function DeltaTransitionTable({
                   </td>
                   <td className="border border-zinc-800 px-3 py-2">
                     {formatDays(row.last_interval_days)}
-                  </td>
-                  <td
-                    className={`border border-zinc-800 px-3 py-2 font-semibold ${active ? "text-[#f5b7b8]" : "text-rose-300"}`}
-                  >
-                    {prediction ? (
-                      <>
-                        {prediction.lo_date} ～ {prediction.hi_date}
-                        {prediction.constraint_applied ? " †" : ""}
-                        {prediction.candidate_window_rebased ? " ‡" : ""}
-                      </>
-                    ) : (
-                      "—"
-                    )}
                   </td>
                 </tr>
               );

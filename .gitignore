@@ -19,6 +19,9 @@ data/news_history/*
 data/news_factor_snapshots/
 data/news_research_history/
 data/futu_snapshots/
+data/market_event_snapshots/
+data/option_chain_snapshots/
+data/stock_pool_snapshots/
 data/gpmapro_trace/
 data/gpma2_trace/
 data/gpmaapro_trace/

@@ -16,10 +16,16 @@ RESEARCH_UNIVERSE: dict[str, tuple[str, ...]] = {
     "ORCL": ("oracle",), "QCOM": ("qualcomm",), "CRM": ("salesforce",), "ADBE": ("adobe",),
 }
 
+# These aliases improve entity validation for manually queried symbols without
+# expanding the fixed research universe used by scheduled factor snapshots.
+EXTRA_ENTITY_ALIASES: dict[str, tuple[str, ...]] = {
+    "MU": ("micron", "micron technology", "micron technology inc"),
+}
+
 
 def entity_terms(symbol: str) -> tuple[str, ...]:
     value = symbol.upper().removeprefix("US.")
-    return (value.casefold(), *RESEARCH_UNIVERSE.get(value, ()))
+    return (value.casefold(), *RESEARCH_UNIVERSE.get(value, ()), *EXTRA_ENTITY_ALIASES.get(value, ()))
 
 
 SECTOR_BENCHMARK = {

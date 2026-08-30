@@ -7,7 +7,7 @@ name = "delta-time-space-backend"
 version = "0.1.0"
 description = "DELTA 时空交易终端后端服务"
 requires-python = ">=3.12,<3.13"
-dependencies = ["fastapi>=0.115,<1.0", "uvicorn[standard]>=0.30,<1.0", "pandas>=2.2,<3.0", "numpy>=2.0,<3.0", "scipy>=1.14,<2.0", "pydantic>=2.9,<3.0", "pydantic-settings>=2.5,<3.0", "python-multipart>=0.0.12,<1.0", "httpx>=0.27,<1.0", "futu-api>=10.10,<11.0", "pywebview>=5.2,<7.0", "pyinstaller>=6.10,<7.0", "openbb-core>=1.6.10,<2.0", "openbb-news>=1.6.2,<2.0", "openbb-yfinance>=1.6.3,<2.0"]
+dependencies = ["fastapi>=0.115,<1.0", "uvicorn[standard]>=0.30,<1.0", "pandas>=2.2,<3.0", "numpy>=2.0,<3.0", "scipy>=1.14,<2.0", "pydantic>=2.9,<3.0", "pydantic-settings>=2.5,<3.0", "python-multipart>=0.0.12,<1.0", "httpx>=0.27,<1.0", "futu-api>=10.10,<11.0", "pywebview>=5.2,<7.0", "pyinstaller>=6.10,<7.0", "openbb-core>=1.6.10,<2.0", "openbb-news>=1.6.2,<2.0", "openbb-yfinance>=1.6.3,<2.0", "yfinance>=0.2.54,<1.0"]
 [project.optional-dependencies]
 dev = ["pytest>=8.3,<9.0"]
 sentiment = ["transformers>=4.46,<5.0", "torch>=2.4,<3.0"]

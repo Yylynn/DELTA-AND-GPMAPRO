@@ -8,7 +8,9 @@ from app.services.news_runtime import (
     get_news_evaluation_service,
     get_news_factor_service,
     get_news_research_service,
+    get_news_scorecard_service,
     get_news_service,
+    get_market_event_radar_service,
 )
 
 router = APIRouter(tags=["news"])
@@ -18,6 +20,8 @@ evaluation_service = get_news_evaluation_service()
 factor_service = get_news_factor_service()
 research_service = get_news_research_service()
 advice_service = get_news_advice_service()
+scorecard_service = get_news_scorecard_service()
+market_event_radar_service = get_market_event_radar_service()
 
 
 @router.get("/news/sources")
@@ -28,6 +32,26 @@ def news_sources():
 @router.get("/news/health")
 def news_health():
     return {"sources": news_service.source_health()}
+
+
+@router.get("/news/market")
+def market_news(limit: int = 30, refresh: bool = False):
+    if not settings.news_enabled:
+        return {"market_items": [], "source_status": "DISABLED", "fetched_at": None, "is_cached": False, "warning": "新闻功能当前已关闭。", "source_warnings": [], "source_health": news_service.source_health()}
+    try:
+        return news_service.get_market(limit=limit, refresh=refresh)
+    except NewsError as error:
+        raise HTTPException(422, str(error))
+
+
+@router.get("/news/market/radar")
+def market_event_radar(refresh: bool = False):
+    if not settings.news_enabled:
+        raise HTTPException(503, "新闻功能当前已关闭。")
+    try:
+        return market_event_radar_service.insight(refresh=refresh)
+    except NewsError as error:
+        raise HTTPException(422, str(error))
 
 
 @router.post("/news/factor/snapshot")
@@ -57,6 +81,16 @@ def news_advice(code: str, background_tasks: BackgroundTasks, refresh: bool = Fa
     try:
         background_tasks.add_task(factor_service.ensure_daily_snapshot, refresh=False)
         return advice_service.advice(code, refresh=refresh, as_of=as_of)
+    except NewsError as error:
+        raise HTTPException(422, str(error))
+
+
+@router.get("/news/{code}/scorecard")
+def news_scorecard(code: str, refresh: bool = False, as_of: str | None = None):
+    if not settings.news_enabled:
+        raise HTTPException(503, "新闻功能当前已关闭。")
+    try:
+        return scorecard_service.scorecard(code, refresh=refresh, as_of=as_of)
     except NewsError as error:
         raise HTTPException(422, str(error))
 

@@ -1,6 +1,6 @@
 import pandas as pd
 
-from app.quant.delta_time import ITDConfig, ITDDeltaEngine, ITD_CALENDAR_DAYS, ITD_TRADING_BARS, MIN_GAP_TRADING_DAYS
+from app.quant.delta_time import _annotate_adjacent_window_conflicts, ITDConfig, ITDDeltaEngine, ITD_CALENDAR_DAYS, ITD_TRADING_BARS, MIN_GAP_TRADING_DAYS
 
 
 def bars(count: int) -> pd.DataFrame:
@@ -91,6 +91,42 @@ def test_two_predictions_are_chained_from_current_boundary_after_real_history():
     assert second["expected_date"] > last_real_date
     assert second["expected_date"] >= second["min_gap_earliest_date"]
     assert first["lo_date"] <= first["expected_date"] <= first["hi_date"]
+
+
+def test_overlapping_prediction_windows_are_preserved_and_conditional_after_unconfirmed_boundary():
+    predictions = [
+        {"number": 3, "phase": "current_candidate", "window_start": "2026-08-15", "window_end": "2026-08-27"},
+        {"number": 4, "phase": "predicted", "window_start": "2026-08-26", "window_end": "2026-09-05"},
+    ]
+    result = _annotate_adjacent_window_conflicts(predictions, {"confirmed": False})
+    second = result[1]
+    assert second["window_start"] == "2026-08-26"  # no artificial date shift
+    assert second["overlaps_previous_window"] is True
+    assert second["overlap_start"] == "2026-08-26"
+    assert second["overlap_end"] == "2026-08-27"
+    assert second["previous_number"] == 3
+    assert second["requires_previous_confirmation"] is True
+    assert second["conditional"] is True
+    assert second["independent_window_eligible"] is False
+
+
+def test_adjacent_prediction_windows_do_not_become_conditional_without_overlap_or_unconfirmed_candidate():
+    separated = [
+        {"number": 3, "phase": "current_candidate", "window_start": "2026-08-15", "window_end": "2026-08-25"},
+        {"number": 4, "phase": "predicted", "window_start": "2026-08-26", "window_end": "2026-09-05"},
+    ]
+    result = _annotate_adjacent_window_conflicts(separated, {"confirmed": False})
+    assert result[1]["overlaps_previous_window"] is False
+    assert result[1]["conditional"] is False
+
+    overlapping = [
+        {"number": 3, "phase": "current_candidate", "window_start": "2026-08-15", "window_end": "2026-08-27"},
+        {"number": 4, "phase": "predicted", "window_start": "2026-08-26", "window_end": "2026-09-05"},
+    ]
+    result = _annotate_adjacent_window_conflicts(overlapping, {"confirmed": True})
+    assert result[1]["overlaps_previous_window"] is True
+    assert result[1]["conditional"] is False
+    assert result[1]["independent_window_eligible"] is True
 
 
 def test_transition_table_covers_one_full_future_number_cycle():
