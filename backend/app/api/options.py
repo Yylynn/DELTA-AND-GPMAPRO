@@ -1,17 +1,18 @@
 from fastapi import APIRouter, HTTPException
 
 from app.services.news_runtime import get_news_factor_service, get_news_service
-from app.services.option_monitor import OptionMonitorService
+from app.services.option_monitor import FutuOptionClient, OptionMonitorService, YahooOptionClient
 from app.core.config import get_settings
 
-router = APIRouter(tags=["期权情绪雷达"])
-options = OptionMonitorService(candidate_provider=lambda limit: get_news_factor_service().candidates(limit), news_provider=lambda code: get_news_service().get(code, limit=30))
 settings = get_settings()
+router = APIRouter(tags=["期权情绪雷达"])
+option_client = FutuOptionClient() if settings.market_data_provider.lower() == "futu" else YahooOptionClient()
+options = OptionMonitorService(client=option_client, candidate_provider=lambda limit: get_news_factor_service().candidates(limit), news_provider=lambda code: get_news_service().get(code, limit=30))
 
 @router.get("/options/monitor")
 def monitor_snapshot():
     if not settings.options_enabled:
-        return {"health": {"status": "DISABLED", "source": "FUTU_OPEND"}, "last_check": None, "alerts": [], "unread_count": 0, "coverage": {"configured": 0, "max_per_scan": 0}}
+        return {"health": {"status": "DISABLED", "source": settings.market_data_provider.upper()}, "last_check": None, "alerts": [], "unread_count": 0, "coverage": {"configured": 0, "max_per_scan": 0}}
     return options.snapshot()
 
 @router.post("/options/monitor/check")

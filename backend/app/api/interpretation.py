@@ -9,10 +9,10 @@ service = SignalInterpretationService(get_news_advice_service())
 
 
 @router.get("/interpretation/{symbol}")
-def interpretation(symbol: str, timeframe: str = "1d", snapshot_id: str | None = None, as_of: str | None = None):
+def interpretation(symbol: str, timeframe: str = "1d", snapshot_id: str | None = None, as_of: str | None = None, include_audit: bool = True):
     try:
         bars, source = bars_for_source(symbol, timeframe, snapshot_id)
-        return service.interpret(bars, symbol, timeframe, source, as_of)
+        return service.interpret(bars, symbol, timeframe, source, as_of, _include_audit=include_audit)
     except FileNotFoundError:
         raise HTTPException(404, "DATASET_NOT_FOUND")
     except ValueError as error:

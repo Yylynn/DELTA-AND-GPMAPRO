@@ -36,7 +36,7 @@ const driverClass = (status: string) => {
 export function SignalInterpretation({ symbol, timeframe, snapshotId, onFocusDate, onOpenNews }: { symbol: string; timeframe: string; snapshotId?: string; onFocusDate: (date: string) => void; onOpenNews?: (symbol: string) => void }) {
   const [selectedDetail, setSelectedDetail] = useState<SignalDetail["source"] | null>(null);
   const snapshotQuery = snapshotId ? `&snapshot_id=${encodeURIComponent(snapshotId)}` : "";
-  const query = useQuery<Interpretation>({ queryKey: ["signal-interpretation", symbol, timeframe, snapshotId], queryFn: () => getInterpretation(`/api/interpretation/${encodeURIComponent(symbol)}?timeframe=${timeframe}${snapshotQuery}`), enabled: Boolean(snapshotId), retry: false });
+  const query = useQuery<Interpretation>({ queryKey: ["signal-interpretation-audit", symbol, timeframe, snapshotId], queryFn: () => getInterpretation(`/api/interpretation/${encodeURIComponent(symbol)}?timeframe=${timeframe}${snapshotQuery}&include_audit=true`), enabled: Boolean(snapshotId), retry: false });
   const data = query.data;
 
   if (query.isLoading) return <section className="panel mt-4 p-4 text-sm text-zinc-400">正在计算行动建议…</section>;

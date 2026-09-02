@@ -2,7 +2,7 @@ from datetime import UTC, datetime, timedelta
 
 import pandas as pd
 
-from app.services.option_monitor import OptionMonitorService
+from app.services.option_monitor import OptionMonitorService, YahooOptionClient
 
 
 class Client:
@@ -70,3 +70,30 @@ def test_empty_chain_is_partial_and_does_not_create_alert(tmp_path):
     assert result["status"] == "PARTIAL"
     assert result["created_alerts"] == []
     assert result["failures"][0]["error"] == "EMPTY_CHAIN"
+
+
+def test_yahoo_option_client_normalises_chain_without_inventing_greeks():
+    class FastInfo(dict):
+        last_price = 100.0
+        last_volume = 1_000_000
+
+    class Chain:
+        calls = pd.DataFrame([{"contractSymbol": "AAPL260925C00100000", "strike": 100, "bid": 2, "ask": 2.2, "lastPrice": 2.1, "volume": 50, "openInterest": 200, "impliedVolatility": .3}])
+        puts = pd.DataFrame([{"contractSymbol": "AAPL260925P00100000", "strike": 100, "bid": 1.8, "ask": 2, "lastPrice": 1.9, "volume": 40, "openInterest": 180, "impliedVolatility": .32}])
+
+    class Ticker:
+        options = ("2026-09-25",)
+        fast_info = FastInfo()
+        calendar = {}
+
+        def option_chain(self, expiry):
+            assert expiry == "2026-09-25"
+            return Chain()
+
+    client = YahooOptionClient(ticker_factory=lambda symbol: Ticker())
+    chain, quotes, scheduled = client.fetch("US.AAPL", datetime(2026, 9, 3, 15, tzinfo=UTC))
+    assert len(chain) == len(quotes) == 2
+    assert set(chain.option_type) == {"CALL", "PUT"}
+    assert quotes.underlying_price.eq(100).all()
+    assert quotes.delta.isna().all() and quotes.gamma.isna().all() and quotes.vega.isna().all()
+    assert scheduled is False

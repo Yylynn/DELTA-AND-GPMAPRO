@@ -149,10 +149,7 @@ def test_gpma2_s01_keeps_reduce_when_delta_low_conflicts(monkeypatch):
     assert any("反向 DELTA LOW" in item for item in result["blocked_by"])
 
 
-def test_gpma2_opend_failure_keeps_local_renderer_fallback(monkeypatch):
-    class _TraceClient:
-        def calculate(self, *_args, **_kwargs): raise RuntimeError("OpenD unavailable")
-    monkeypatch.setattr("app.services.signal_interpretation.FutuGpmaProTraceClient", _TraceClient)
+def test_gpma2_authority_never_connects_to_opend():
     assert SignalInterpretationService._gpma2_authority(_frame(), "US.TEST", "1d") == ("LOCAL_RENDERER_FALLBACK", None)
 
 

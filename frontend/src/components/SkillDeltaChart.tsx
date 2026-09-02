@@ -3,7 +3,6 @@
  * native pan/zoom time axis with the original GPMAPRO drawing engine.
  */
 import { useQueryClient } from "@tanstack/react-query";
-import { useEffect, useState } from "react";
 import {
   TerminalChart,
   type ChartBar,
@@ -115,6 +114,10 @@ export function SkillDeltaChart({
   bars,
   analysis,
   gpma = [],
+  gpma2 = [],
+  gpma2Status,
+  gpma2Loading = false,
+  gpma2Error,
   focusDate,
   showReversal = true,
   compact = false,
@@ -125,6 +128,10 @@ export function SkillDeltaChart({
   bars: ChartBar[];
   analysis?: DeltaAnalysis;
   gpma?: GpmaSeries[];
+  gpma2?: GpmaSeries[];
+  gpma2Status?: "not_reconciled" | "matched" | "drift";
+  gpma2Loading?: boolean;
+  gpma2Error?: string;
   focusDate?: string;
   showReversal?: boolean;
   compact?: boolean;
@@ -133,25 +140,6 @@ export function SkillDeltaChart({
   analysisError?: string;
 }) {
   const client = useQueryClient();
-  // QueryClient itself is stable and does not cause a render when a query
-  // settles.  Subscribe to its cache so GPMA2 becomes visible immediately
-  // after the OpenD request completes instead of remaining an empty layer.
-  const [, setGpma2CacheVersion] = useState(0);
-  useEffect(
-    () =>
-      client
-        .getQueryCache()
-        .subscribe((event) => {
-          const key = event?.query.queryKey;
-          if (Array.isArray(key) && key[0] === "gpma2-series") {
-            queueMicrotask(() => setGpma2CacheVersion((version) => version + 1));
-          }
-        }),
-    [client],
-  );
-  const gpma2Candidates = client
-    .getQueriesData<{ series: GpmaSeries[] }>({ queryKey: ["gpma2-series"] })
-    .map(([, value]) => value?.series ?? []);
   // Older compact call sites do not pass their series yet.  In that case,
   // select only a cache entry whose formula close values match these exact
   // candles.  A first-nonempty cache lookup could combine two symbols (or two
@@ -195,27 +183,6 @@ export function SkillDeltaChart({
     : compatible[0]?.error < 0.001
       ? compatible[0].series
       : [];
-  const matchedGpma2 = gpma2Candidates
-    .map((series) => {
-      const deltas = series.flatMap((row) => {
-        const close = barClose.get(row.time);
-        return typeof row.close === "number" &&
-          typeof close === "number" &&
-          close !== 0
-          ? [Math.abs(row.close - close) / Math.abs(close)]
-          : [];
-      });
-      return {
-        series,
-        error:
-          deltas.length >= 3
-            ? deltas.reduce((sum, value) => sum + value, 0) / deltas.length
-            : Infinity,
-      };
-    })
-    .sort((left, right) => left.error - right.error)[0];
-  const matchedGpma2Series =
-    matchedGpma2?.error < 0.001 ? matchedGpma2.series : [];
   const windows = (analysis?.points ?? []).map((point) => ({
     event_id: point.id,
     event_type: point.type,
@@ -229,7 +196,10 @@ export function SkillDeltaChart({
       <TerminalChart
         bars={bars}
         gpma={matchedGpma}
-        gpma2={matchedGpma2Series}
+        gpma2={gpma2}
+        gpma2Status={gpma2Status}
+        gpma2Loading={gpma2Loading}
+        gpma2Error={gpma2Error}
         deltaWindows={windows}
         deltaAnalysis={analysis}
         focusDate={focusDate}
