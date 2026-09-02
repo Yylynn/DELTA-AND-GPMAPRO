@@ -15,6 +15,8 @@ from app.data.providers import validate_ohlcv
 from app.quant.delta_time import ITDDeltaEngine
 from app.services.gpmapro_engine import GpmaProEngine
 from app.services.trading_calendar import is_session
+from app.config.stock_pool_universe import STOCK_POOL_UNIVERSE, STOCK_POOL_UNIVERSE_VERSION
+from app.core.config import get_settings
 
 NY = ZoneInfo("America/New_York")
 MARKET_CAP_FLOOR_USD, MAX_SNAPSHOT_BATCH, MIN_HISTORY_BARS = 30_000_000_000, 400, 300
@@ -111,16 +113,94 @@ class FutuStockPoolDataService:
         clean.to_csv(self._bar_path(code), index=False); return clean, None
 
 
+class YahooStockPoolDataService:
+    """Zero-key stock-pool data backed by the versioned local US universe."""
+    def __init__(self, root: Path, now: Callable[[], datetime] | None = None, ticker_factory=None):
+        self.root = root; self.root.mkdir(parents=True, exist_ok=True)
+        self.bars_root = root / "bars"; self.bars_root.mkdir(exist_ok=True)
+        self.now = now or (lambda: datetime.now(UTC))
+        self._ticker_factory = ticker_factory
+
+    def _ticker(self, symbol: str):
+        if self._ticker_factory: return self._ticker_factory(symbol)
+        try: import yfinance as yf
+        except ImportError as error: raise StockPoolDataError("yfinance is not installed") from error
+        return yf.Ticker(symbol)
+
+    def connection_status(self) -> dict:
+        try:
+            import yfinance
+            return {"source": "yahoo_finance", "reachable": True, "requires_api_key": False, "version": getattr(yfinance, "__version__", "unknown")}
+        except ImportError as error:
+            return {"source": "yahoo_finance", "reachable": False, "requires_api_key": False, "error": str(error)}
+
+    def fetch_universe(self) -> list[dict]:
+        if not self.connection_status()["reachable"]: raise StockPoolDataError("yfinance is not installed")
+        return [{"code": f"US.{symbol}", "name": symbol, "industry": category, "stock_type": "STOCK"} for symbol, category in STOCK_POOL_UNIVERSE.items()]
+
+    @staticmethod
+    def _number(container, *keys):
+        for key in keys:
+            try:
+                value = getattr(container, key)
+            except (AttributeError, KeyError, TypeError):
+                try: value = container.get(key)
+                except Exception: value = None
+            try:
+                number = float(value)
+                if pd.notna(number) and number > 0: return number
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    def fetch_market_snapshots(self, codes: list[str]) -> tuple[dict[str, dict], dict[str, int]]:
+        output, health = {}, {"batches": 0, "failed_batches": 0}
+        for code in codes:
+            health["batches"] += 1
+            try:
+                fast = self._ticker(code.removeprefix("US.")).fast_info
+                price = self._number(fast, "last_price", "lastPrice")
+                market_cap = self._number(fast, "market_cap", "marketCap")
+                shares = self._number(fast, "shares") or (market_cap / price if market_cap and price else None)
+                if not (price and shares and market_cap):
+                    health["failed_batches"] += 1; continue
+                output[code] = {"last_price": price, "issued_shares": shares, "market_cap_usd": market_cap, "suspended": False, "currency": "USD"}
+            except Exception:
+                health["failed_batches"] += 1
+        return output, health
+
+    def _bar_path(self, code: str) -> Path: return self.bars_root / f"{code.replace('.', '_')}.csv"
+    def load_bars(self, code: str) -> pd.DataFrame:
+        frame, _ = validate_ohlcv(pd.read_csv(self._bar_path(code))); return frame
+
+    def sync_daily_bars(self, code: str, min_bars=MIN_HISTORY_BARS) -> tuple[pd.DataFrame | None, str | None]:
+        try: existing = self.load_bars(code)
+        except (FileNotFoundError, ValueError): existing = None
+        start = ((pd.Timestamp(existing.date.max()).date() - timedelta(days=8)).isoformat() if existing is not None and len(existing) >= min_bars else (self.now().date() - timedelta(days=520)).isoformat())
+        end = (self.now().date() + timedelta(days=1)).isoformat()
+        try:
+            raw = self._ticker(code.removeprefix("US.")).history(start=start, end=end, interval="1d", actions=False, auto_adjust=True, repair=True, timeout=15, raise_errors=True)
+            if raw is None or raw.empty: return None, "Yahoo Finance 未返回日线"
+            data = raw.reset_index(); date_column = next((x for x in data.columns if str(x).lower() in {"date", "datetime"}), data.columns[0])
+            data = data.rename(columns={date_column: "date", "Open": "open", "High": "high", "Low": "low", "Close": "close", "Volume": "volume"})
+            clean, _ = validate_ohlcv(data if existing is None else pd.concat([existing, data], ignore_index=True).drop_duplicates("date", keep="last"))
+        except Exception as error: return None, str(error)
+        if len(clean) < min_bars: return None, f"历史日线不足 {min_bars} 根（当前 {len(clean)}）"
+        clean.to_csv(self._bar_path(code), index=False, float_format="%.10f"); return clean, None
+
+
 class StockPoolService:
     def __init__(self, root: Path, *, data_service=None, market_alerts=None, news_service=None, now=None):
         self.root = root; self.root.mkdir(parents=True, exist_ok=True)
-        self.data = data_service or FutuStockPoolDataService(root.parent / "stock_pool_data")
+        settings = get_settings()
+        data_root = root.parent / "stock_pool_data"
+        self.data = data_service or (FutuStockPoolDataService(data_root) if settings.market_data_provider.lower() == "futu" else YahooStockPoolDataService(data_root / "yahoo"))
         self.market_alerts, self.news_service, self.now = market_alerts, news_service, now or (lambda: datetime.now(timezone.utc))
         self.gpma, self.delta = GpmaProEngine(), ITDDeltaEngine()
 
-    @staticmethod
-    def config() -> dict:
-        return {"market": "US", "universe_version": UNIVERSE_VERSION, "market_cap_floor_usd": MARKET_CAP_FLOOR_USD, "snapshot_batch_size": MAX_SNAPSHOT_BATCH, "min_daily_bars": MIN_HISTORY_BARS, "pair_gap_trading_days": PAIR_GAP_TRADING_DAYS, "candidate_ttl_trading_days": CANDIDATE_TTL_TRADING_DAYS, "accepted_gpmapro_markers": [x[1] for x in BUY_MARKERS], "round_trip_cost_bps": ROUND_TRIP_COST_BPS, "research_only": True}
+    def config(self) -> dict:
+        source = self.data.connection_status().get("source")
+        return {"market": "US", "provider": source, "universe_version": STOCK_POOL_UNIVERSE_VERSION if source == "yahoo_finance" else UNIVERSE_VERSION, "market_cap_floor_usd": MARKET_CAP_FLOOR_USD, "snapshot_batch_size": MAX_SNAPSHOT_BATCH, "min_daily_bars": MIN_HISTORY_BARS, "pair_gap_trading_days": PAIR_GAP_TRADING_DAYS, "candidate_ttl_trading_days": CANDIDATE_TTL_TRADING_DAYS, "accepted_gpmapro_markers": [x[1] for x in BUY_MARKERS], "round_trip_cost_bps": ROUND_TRIP_COST_BPS, "research_only": True}
     def _path(self, day): return self.root / f"{day}_{UNIVERSE_VERSION}.json"
     @staticmethod
     def _read(path):
@@ -184,7 +264,7 @@ class StockPoolService:
         market = self._market_state(self.market_alerts.snapshot() if self.market_alerts else None); health = {"source": self.data.connection_status(), "unscanned": {}, "synchronized": 0}
         try: listed = self.data.fetch_universe(); snapshots, batches = self.data.fetch_market_snapshots([x["code"] for x in listed])
         except StockPoolDataError as error:
-            payload = {"schema_version": SCHEMA_VERSION, "snapshot_id": path.stem, "status": "DATA_SOURCE_UNAVAILABLE", "session_date": day, "scanned_at": self.now().astimezone(UTC).isoformat(), "config": self.config(), "market": market, "coverage": {"listed": 0, "cap_eligible": 0, "synchronized": 0, "buy_candidates": 0}, "health": {**health, "unscanned": {"OPEND_UNAVAILABLE": 1}, "error": str(error)}, "buy_candidates": [], "market_risk_candidates": [], "universe": {}, "disclaimer": "研究候选，非自动交易或投资建议。"}
+            payload = {"schema_version": SCHEMA_VERSION, "snapshot_id": path.stem, "status": "DATA_SOURCE_UNAVAILABLE", "session_date": day, "scanned_at": self.now().astimezone(UTC).isoformat(), "config": self.config(), "market": market, "coverage": {"listed": 0, "cap_eligible": 0, "synchronized": 0, "buy_candidates": 0}, "health": {**health, "unscanned": {"DATA_SOURCE_UNAVAILABLE": 1}, "error": str(error)}, "buy_candidates": [], "market_risk_candidates": [], "universe": {}, "disclaimer": "研究候选，非自动交易或投资建议。"}
             # An unavailable source is health state, not an immutable daily
             # result: leave the date retryable for the five-minute scheduler.
             return {**payload, "idempotent": False}
@@ -208,7 +288,7 @@ class StockPoolService:
         coverage = {"listed": len(listed), "market_snapshots": len(snapshots), "cap_eligible": len(eligible), "synchronized": health["synchronized"], "buy_candidates": len(normal), "market_risk_candidates": len(risk), "snapshot_batches": batches["batches"], "failed_snapshot_batches": batches["failed_batches"]}
         health["unscanned"] = {k: v for k, v in {**reasons, **failures}.items() if v}
         inputs = [{"code": meta["code"], "name": meta["name"], "market_cap_inputs": snap} for meta, snap in eligible]
-        payload = {"schema_version": SCHEMA_VERSION, "snapshot_id": path.stem, "status": "RESEARCH_ONLY", "session_date": day, "scanned_at": self.now().astimezone(UTC).isoformat(), "config": self.config(), "market": market, "coverage": coverage, "health": health, "universe": {"version": UNIVERSE_VERSION, "source": "futu_opend.get_stock_basicinfo+get_market_snapshot", "listed_count": len(listed), "eligible_count": len(eligible), "cap_inputs": inputs}, "buy_candidates": normal, "market_risk_candidates": risk, "disclaimer": "研究候选，非自动交易或投资建议；没有下单、账户或持仓接口。"}
+        payload = {"schema_version": SCHEMA_VERSION, "snapshot_id": path.stem, "status": "RESEARCH_ONLY", "session_date": day, "scanned_at": self.now().astimezone(UTC).isoformat(), "config": self.config(), "market": market, "coverage": coverage, "health": health, "universe": {"version": STOCK_POOL_UNIVERSE_VERSION if health["source"].get("source") == "yahoo_finance" else UNIVERSE_VERSION, "source": health["source"].get("source", "unknown"), "listed_count": len(listed), "eligible_count": len(eligible), "cap_inputs": inputs}, "buy_candidates": normal, "market_risk_candidates": risk, "disclaimer": "研究候选，非自动交易或投资建议；没有下单、账户或持仓接口。"}
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"); return {**payload, "idempotent": False}
     def ensure_daily_scan(self):
         local = self.now().astimezone(NY)

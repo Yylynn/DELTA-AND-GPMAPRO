@@ -12,11 +12,8 @@ $npm = 'C:\Program Files\nodejs\npm.cmd'
 Check 'Node.js' (Test-Path $node) $(if (Test-Path $node) { (& $node --version).Trim() } else { 'Install Node.js LTS.' })
 Check 'npm' (Test-Path $npm) $(if (Test-Path $npm) { (& $npm --version).Trim() } else { 'Install Node.js LTS.' })
 if (Test-Path $venv) {
-    # `futu` is loaded lazily by the snapshot endpoint, so omitting it here
-    # previously let the app start successfully and fail only after a user
-    # pressed "拉取".  Verify the exact runtime used by the launcher instead.
-    & $venv -c "import fastapi,uvicorn,pandas,numpy,scipy,pydantic,pydantic_settings,multipart,httpx,pytest,webview,PyInstaller,openbb,futu" 2>$null
-    Check 'Python packages' ($LASTEXITCODE -eq 0) $(if ($LASTEXITCODE -eq 0) { 'Installed, including Futu OpenD SDK and OpenBB news runtime.' } else { 'Run .venv-local\\Scripts\\python.exe -m pip install -e .[dev] in backend.' })
+    & $venv -c "import fastapi,uvicorn,pandas,numpy,scipy,pydantic,pydantic_settings,multipart,httpx,pytest,webview,PyInstaller,openbb,yfinance" 2>$null
+    Check 'Python packages' ($LASTEXITCODE -eq 0) $(if ($LASTEXITCODE -eq 0) { 'Installed, including zero-key Yahoo market data and OpenBB news runtime.' } else { 'Run .venv-local\\Scripts\\python.exe -m pip install -e .[dev] in backend.' })
 }
 Check 'Frontend packages' (Test-Path (Join-Path $root 'frontend\node_modules')) $(if (Test-Path (Join-Path $root 'frontend\node_modules')) { 'Installed.' } else { 'Run npm install in frontend.' })
 if ($failed) { Write-Host 'Environment check failed.' -ForegroundColor Yellow; exit 1 }

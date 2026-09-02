@@ -4,11 +4,13 @@ from fastapi import APIRouter
 
 from app.core.config import get_settings
 from app.services.futu_snapshot import FutuSnapshotService
+from app.services.market_snapshot import MarketSnapshotService
 from app.services.research_metadata import code_identity
 
 router = APIRouter(tags=["系统"])
 started_at = datetime.now(UTC).isoformat()
 futu = FutuSnapshotService()
+market = MarketSnapshotService(get_settings().market_data_provider, futu=futu)
 
 @router.get("/health")
 def health_check() -> dict[str, str]:
@@ -27,5 +29,6 @@ def system_status() -> dict:
         "status": "ok",
         "started_at": started_at,
         "application": {"name": settings.app_name, "environment": settings.environment, **code_identity()},
+        "market_data": market.status(),
         "opend": futu.connection_status(),
     }

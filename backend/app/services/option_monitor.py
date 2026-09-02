@@ -49,6 +49,7 @@ def _first(row: pd.Series | dict, *names: str, default: Any = None) -> Any:
 
 class FutuOptionClient:
     """Thin adapter so tests never need an OpenD process."""
+    source = "futu_opend"
     def __init__(self, host: str = "127.0.0.1", port: int = 11111):
         self.host, self.port = host, port
 
@@ -58,6 +59,10 @@ class FutuOptionClient:
                 return
         except OSError as error:
             raise OptionMonitorError(f"OpenD is unavailable at {self.host}:{self.port}: {error}") from error
+
+    def health(self) -> dict:
+        self._endpoint()
+        return {"status": "AVAILABLE", "source": "FUTU_OPEND"}
 
     def fetch(self, code: str, now: datetime) -> tuple[pd.DataFrame, pd.DataFrame, bool]:
         self._endpoint()
@@ -106,6 +111,80 @@ class FutuOptionClient:
             return False
 
 
+class YahooOptionClient:
+    """Zero-key Yahoo option-chain adapter with no invented Greeks."""
+    source = "yahoo_finance"
+
+    def __init__(self, ticker_factory=None):
+        self._ticker_factory = ticker_factory
+
+    def _ticker(self, symbol: str):
+        if self._ticker_factory:
+            return self._ticker_factory(symbol)
+        try:
+            import yfinance as yf
+        except ImportError as error:  # pragma: no cover
+            raise OptionMonitorError("yfinance is not installed") from error
+        return yf.Ticker(symbol)
+
+    def health(self) -> dict:
+        try:
+            import yfinance
+            return {"status": "AVAILABLE", "source": "YAHOO_FINANCE", "version": getattr(yfinance, "__version__", "unknown")}
+        except ImportError:
+            return {"status": "UNAVAILABLE", "source": "YAHOO_FINANCE", "error": "yfinance is not installed"}
+
+    @staticmethod
+    def _scheduled(ticker, now: datetime) -> bool:
+        try:
+            calendar = ticker.calendar
+            values = calendar.values() if isinstance(calendar, dict) else []
+            for value in values:
+                candidates = value if isinstance(value, (list, tuple)) else [value]
+                for candidate in candidates:
+                    event_date = pd.Timestamp(candidate).date()
+                    if now.date() <= event_date <= now.date() + timedelta(days=7):
+                        return True
+        except Exception:
+            pass
+        return False
+
+    def fetch(self, code: str, now: datetime) -> tuple[pd.DataFrame, pd.DataFrame, bool]:
+        symbol = code.upper().removeprefix("US.")
+        ticker = self._ticker(symbol)
+        try:
+            expiries = []
+            for raw_expiry in ticker.options:
+                expiry = pd.Timestamp(raw_expiry).date()
+                dte = (expiry - now.date()).days
+                if MIN_DTE <= dte <= MAX_DTE:
+                    expiries.append((raw_expiry, expiry))
+            fast = ticker.fast_info
+            spot = _number(getattr(fast, "last_price", None) or (fast.get("last_price") if hasattr(fast, "get") else None))
+            stock_volume = _number(getattr(fast, "last_volume", None) or (fast.get("last_volume") if hasattr(fast, "get") else None))
+            chain_rows, quote_rows = [], []
+            for raw_expiry, expiry in expiries:
+                chain = ticker.option_chain(raw_expiry)
+                for option_type, frame in (("CALL", chain.calls), ("PUT", chain.puts)):
+                    if frame is None or frame.empty:
+                        continue
+                    for _, row in frame.iterrows():
+                        contract = str(row.get("contractSymbol", ""))
+                        if not contract:
+                            continue
+                        chain_rows.append({"code": contract, "strike_price": row.get("strike"), "strike_time": expiry.isoformat(), "option_type": option_type})
+                        quote_rows.append({
+                            "code": contract, "underlying_price": spot, "underlying_volume": stock_volume,
+                            "bid_price": row.get("bid"), "ask_price": row.get("ask"), "last_price": row.get("lastPrice"),
+                            "volume": row.get("volume"), "open_interest": row.get("openInterest"),
+                            "implied_volatility": row.get("impliedVolatility"),
+                            "delta": None, "gamma": None, "vega": None,
+                        })
+            return pd.DataFrame(chain_rows), pd.DataFrame(quote_rows), self._scheduled(ticker, now)
+        except Exception as error:
+            raise OptionMonitorError(f"Yahoo Finance option-chain request failed for {symbol}: {error}") from error
+
+
 class OptionMonitorService:
     def __init__(self, root: Path | None = None, client: FutuOptionClient | None = None,
                  candidate_provider: Callable[[int], dict] | None = None,
@@ -134,12 +213,12 @@ class OptionMonitorService:
 
     def health(self) -> dict:
         try:
-            self.client._endpoint() if isinstance(self.client, FutuOptionClient) else None
-            status, error = "AVAILABLE", None
+            result = self.client.health() if hasattr(self.client, "health") else {"status": "AVAILABLE"}
+            status, error = result.get("status", "AVAILABLE"), result.get("error")
         except Exception as reason:
             status, error = "UNAVAILABLE", str(reason)
         scans = self._state().get("scans", [])
-        return {"status": status, "source": "FUTU_OPEND", "error": error,
+        return {"status": status, "source": str(getattr(self.client, "source", "unknown")).upper(), "error": error,
                 "last_snapshot_at": scans[-1].get("captured_at") if scans else None,
                 "snapshot_count": len(list(self.root.glob("*.csv"))),
                 "limitations": ["不含逐笔成交方向、开平仓或多腿识别。", "期权信号只用于研究预警，不改变交易行动等级。"]}
@@ -279,7 +358,7 @@ class OptionMonitorService:
                     frame.to_csv(csv_path, index=False)
                     aggregate, history = self._aggregate(frame), self._history(symbol, captured)
                     signals = self._signals(aggregate, history, scheduled)
-                    manifest = {"schema_version": 1, "snapshot_id": snapshot_id, "source": "futu_opend", "symbol": f"US.{symbol}", "captured_at": captured.isoformat(), "sha256": digest, "scheduled_event": scheduled, "quality": quality, "aggregate": aggregate, "signals": signals}
+                    manifest = {"schema_version": 1, "snapshot_id": snapshot_id, "source": getattr(self.client, "source", "unknown"), "symbol": f"US.{symbol}", "captured_at": captured.isoformat(), "sha256": digest, "scheduled_event": scheduled, "quality": quality, "aggregate": aggregate, "signals": signals}
                     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
                     if any(signal["kind"] in {"ATTENTION_SURGE", "VOLATILITY_REPRICE"} for signal in signals):
                         relation = self._news_relation(symbol, captured.isoformat(), captured)

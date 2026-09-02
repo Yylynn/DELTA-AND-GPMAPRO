@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     twelve_data_api_key: str = ""
     fred_api_key: str = ""
     sec_user_agent: str = "DELTA-Research-Terminal/0.1 research@example.invalid"
+    market_data_provider: str = "yahoo"
     options_enabled: bool = True
     stock_pool_enabled: bool = True
     model_config = SettingsConfigDict(env_file="../.env", env_prefix="DELTA_", case_sensitive=False, extra="ignore")

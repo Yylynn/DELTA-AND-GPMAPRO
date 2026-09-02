@@ -277,6 +277,14 @@ function MarketAlertBanner({
   const unread = (data?.active_alerts ?? data?.alerts ?? []).filter(
     (item) => !item.read,
   );
+  const threshold = data?.config.change_threshold_pct ?? 3;
+  const latestReadings = (data?.config.indicators ?? []).map((indicator) => ({
+    indicator,
+    reading: data?.observations
+      .slice()
+      .reverse()
+      .find((item) => item.id === indicator.id),
+  }));
   const highest = data?.regime === "CRISIS" ? "RISK" : data?.regime === "RISK" ? "RISK" : data?.regime === "WATCH" ? "WATCH" : unread.some((item) => item.severity === "RISK")
     ? "RISK"
     : unread.length
@@ -287,27 +295,63 @@ function MarketAlertBanner({
       {checking ? <InlineLoading description="刷新中" /> : "立即刷新"}
     </Button>
   );
-  if (!unread.length && (!data?.regime || data.regime === "NORMAL"))
-    return (
-      <div className={`market-alert-banner ${error ? "watch" : "normal"}`}>
-        <BellRing size={16} />
-        <span>
-          {error
-            ? `市场风险雷达刷新失败：${error}`
-            : "市场风险雷达：暂无未读预警"}
-        </span>
-        {action}
-      </div>
-    );
-  const message = data?.regime && data.regime !== "NORMAL"
-    ? `综合评分 ${data.risk_score ?? "—"}/100 · ${data.risk_transition ?? "风险状态更新"}；${data.evidence?.[0]?.label ?? "跨资产模块"}：${data.evidence?.[0]?.message ?? "等待证据"}`
-    : unread.map((item) => `${item.label}：${item.message}`).join("；");
+  const hasElevatedRisk = Boolean(
+    unread.length || (data?.regime && data.regime !== "NORMAL"),
+  );
+  const message = error
+    ? `刷新失败：${error}`
+    : data?.regime && data.regime !== "NORMAL"
+      ? `综合评分 ${data.risk_score ?? "未计算"}/100；${data.risk_transition ?? "风险状态更新"}；${data.evidence?.[0]?.label ?? "跨资产模块"}：${data.evidence?.[0]?.message ?? "等待证据"}`
+      : unread.length
+        ? unread.map((item) => `${item.label}：${item.message}`).join("；")
+        : `综合评分 ${data?.risk_score ?? "未计算"}/100；当前指标未触发关注或高风险条件`;
+  const bannerTone = error ? "watch" : hasElevatedRisk ? highest.toLowerCase() : "normal";
+  const title = data?.regime === "CRISIS"
+    ? "市场危机状态"
+    : highest === "RISK"
+      ? "市场高风险预警"
+      : "市场波动预警";
   return (
-    <div className={`market-alert-banner ${highest.toLowerCase()}`}>
+    <div className={`market-alert-banner ${bannerTone}`}>
       <BellRing size={16} />
       <div className="market-alert-body">
-        <b>{data?.regime === "CRISIS" ? "市场危机状态" : highest === "RISK" ? "市场高风险预警" : "市场波动预警"}</b>
-        <MarketAlertMarquee message={message} />
+        <div className="market-alert-summary">
+          <b>{title}</b>
+          <MarketAlertMarquee message={message} />
+        </div>
+        <div className="market-alert-indicators" aria-label="当前波动率指标与触发条件">
+          <span className="market-alert-rule">
+            单日上涨 ≥ {threshold.toFixed(1)}%：显示“关注”
+          </span>
+          {latestReadings.map(({ indicator, reading }) => {
+            const tone = reading?.severity === "RISK"
+              ? "risk"
+              : reading?.severity === "WATCH"
+                ? "watch"
+                : reading
+                  ? "normal"
+                  : "pending";
+            const levelRule = indicator.watch_level == null
+              ? `涨幅阈值 ${threshold.toFixed(1)}%`
+              : `关注 ≥ ${indicator.watch_level} / 高风险 ≥ ${indicator.risk_level}`;
+            return (
+              <span
+                className={`market-alert-indicator ${tone}`}
+                key={indicator.id}
+                title={`${indicator.label}：${levelRule}`}
+              >
+                <b>{indicator.label}</b>
+                <span>{reading ? reading.close.toFixed(2) : "待刷新"}</span>
+                {reading && (
+                  <span className="market-alert-change">
+                    {reading.change_pct >= 0 ? "+" : ""}{reading.change_pct.toFixed(2)}%
+                  </span>
+                )}
+                <small>{reading?.severity === "RISK" ? "高风险" : reading?.severity === "WATCH" ? "关注" : reading ? "正常" : levelRule}</small>
+              </span>
+            );
+          })}
+        </div>
       </div>
       {action}
     </div>
@@ -826,6 +870,7 @@ function Overview({
     string | undefined
   >();
   const [focusDate, setFocusDate] = useState<string | undefined>();
+  const [showFullDecision, setShowFullDecision] = useState(false);
   const [fetching, setFetching] = useState(false);
   const [fetchError, setFetchError] = useState<string | null>(null);
   const [lastFetch, setLastFetch] = useState<{
@@ -836,8 +881,8 @@ function Overview({
   } | null>(null);
   const autoFetchKey = useRef(-1);
   const snapshots = useQuery<{ snapshots: Snapshot[] }>({
-    queryKey: ["futu-snapshots"],
-    queryFn: () => request("/api/data/futu/snapshots"),
+    queryKey: ["market-snapshots"],
+    queryFn: () => request("/api/data/market/snapshots"),
     retry: false,
   });
   // Most research snapshots are daily so that EMA250 has full warm-up.  A
@@ -867,13 +912,13 @@ function Overview({
     setFetching(true);
     setFetchError(null);
     try {
-      const created = await request("/api/data/futu/snapshots", {
+      const created = await request("/api/data/market/snapshots", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           code,
           timeframe: "1d",
-          autype: "QFQ",
+          adjustment: "adjusted",
           start: "2018-01-01",
         }),
       });
@@ -909,7 +954,7 @@ function Overview({
     queryKey: ["bars", symbol, timeframe, snapshotId],
     queryFn: () =>
       request(
-        `/api/data/futu/snapshots/${snapshotId}/ohlcv?timeframe=${timeframe}`,
+        `/api/data/market/snapshots/${snapshotId}/ohlcv?timeframe=${timeframe}`,
       ),
     enabled: Boolean(snapshotId),
     retry: false,
@@ -937,7 +982,11 @@ function Overview({
     enabled: Boolean(snapshotId),
     retry: false,
   });
-  useQuery<{ series: GpmaSeries[] }>({
+  const gpma2 = useQuery<{
+    series: GpmaSeries[];
+    calculation_source: "local_gpmaapro_v1";
+    reconciliation_status: "not_reconciled" | "matched" | "drift";
+  }>({
     queryKey: ["gpma2-series", symbol, timeframe, snapshotId],
     queryFn: () =>
       request(
@@ -954,8 +1003,8 @@ function Overview({
     retry: false,
   });
   const interpretation = useQuery<Interpretation>({
-    queryKey: ["signal-interpretation", symbol, timeframe, snapshotId],
-    queryFn: () => request(`/api/interpretation/${encodeURIComponent(symbol)}?timeframe=${timeframe}${snapshotQuery}`),
+    queryKey: ["signal-interpretation-current", symbol, timeframe, snapshotId],
+    queryFn: () => request(`/api/interpretation/${encodeURIComponent(symbol)}?timeframe=${timeframe}${snapshotQuery}&include_audit=false`),
     enabled: Boolean(snapshotId),
     retry: false,
   });
@@ -997,7 +1046,7 @@ function Overview({
         >
           <span className="overview-toolbar-status">
             {fetching
-              ? "OpenD 拉取中…"
+              ? "行情拉取中…"
               : `Latest Bar ${volume.data?.data.latest_bar_date ?? "—"}`}
           </span>
           <MarketCodeInput
@@ -1026,7 +1075,7 @@ function Overview({
         </form>
       </header>
       {fetchError && (
-        <p className="error-banner mb-3">OpenD 拉取失败：{fetchError}</p>
+        <p className="error-banner mb-3">行情拉取失败：{fetchError}</p>
       )}
       {lastFetch && (
         <p className="mb-3 text-xs text-emerald-300">
@@ -1035,7 +1084,7 @@ function Overview({
         </p>
       )}
       {!snapshotId ? (
-        <section className="empty-state panel panel-evidence"><strong>尚未找到 {symbol} 的可用行情快照</strong><span>使用右上角“拉取”创建不可变 OpenD 快照后，系统才会显示 K 线、行动建议与研究证据。</span></section>
+        <section className="empty-state panel panel-evidence"><strong>尚未找到 {symbol} 的可用行情快照</strong><span>使用右上角“拉取”创建不可变市场快照后，系统才会显示 K 线、行动建议与研究证据。</span></section>
       ) : (
         <div className="command-center">
           <div className="command-layout">
@@ -1050,6 +1099,10 @@ function Overview({
                   bars={chartBars}
                   analysis={itd.data}
                   gpma={series.data?.series ?? []}
+                  gpma2={gpma2.data?.series ?? []}
+                  gpma2Status={gpma2.data?.reconciliation_status}
+                  gpma2Loading={gpma2.isLoading}
+                  gpma2Error={gpma2.isError ? (gpma2.error instanceof Error ? gpma2.error.message : "接口未返回结果") : undefined}
                   focusDate={focusDate}
                   showReversal={false}
                   mode="overview"
@@ -1082,7 +1135,7 @@ function Overview({
               <section className="command-side-panel panel panel-research"><div className="command-panel-heading"><span>模型与数据</span><StatusBadge tone={volume.data?.data.freshness === "FRESH" ? "positive" : "warning"}>{volume.data?.data.freshness ?? "未知"}</StatusBadge></div><div className="command-model-list"><div><span>GPMAPRO 趋势</span><b>{state?.trend.direction ?? "—"}</b></div><div><span>DELTA 倒转</span><b>{itd.data?.reversal?.state ?? "—"}</b></div><div><span>新闻覆盖层</span><b>{action?.news_overlay.status ?? "等待计算"}</b></div><div><span>验证状态</span><b>{action?.validation.status ?? "—"}</b></div></div></section>
             </aside>
           </div>
-          <details className="command-full-decision"><summary>查看完整行动解释与审计</summary><SignalInterpretation symbol={symbol} timeframe={timeframe} snapshotId={snapshotId} onFocusDate={setFocusDate} onOpenNews={onOpenNews} /></details>
+          <details className="command-full-decision" onToggle={(event) => setShowFullDecision(event.currentTarget.open)}><summary>查看完整行动解释与审计</summary>{showFullDecision && <SignalInterpretation symbol={symbol} timeframe={timeframe} snapshotId={snapshotId} onFocusDate={setFocusDate} onOpenNews={onOpenNews} />}</details>
         </div>
       )}
     </div>
@@ -1105,6 +1158,7 @@ type SystemStatus = {
   status: string;
   started_at: string;
   application: { name: string; app_version: string; environment: string; git_commit: string; git_dirty: boolean | null };
+  market_data: { active_provider: string; snapshot_count: number; active: { status?: string; provider?: string; library_version?: string; last_success_at?: string | null } };
   opend: { connected: boolean; connection_check: string; connection_status: string; host: string; port: number; sdk_version: string; last_success_at: string | null; last_snapshot_at: string | null; last_snapshot_id: string | null; snapshot_count: number; error: string | null };
 };
 
@@ -1114,17 +1168,17 @@ function Settings() {
   return <div className="terminal-page">
     <PageHeader title="模型设置" description="查看本地研究终端版本、数据连接与运行状态。" />
     {status.isError && <p className="error-banner">无法读取后端运行状态；请确认本地服务已启动。</p>}
-    <section className={`panel panel-system p-4 ${data?.opend.connected ? "is-ready" : "is-blocked"}`}>
+    <section className={`panel panel-system p-4 ${data?.market_data.active.status === "UNAVAILABLE" ? "is-blocked" : "is-ready"}`}>
       <PanelHeading title="系统状态" description="只读运行信息；不读取账户或交易数据" meta={data?.started_at ? `启动于 ${data.started_at}` : "等待后端"} />
       <div className="overview-metrics">
         <MetricCard label="后端版本" value={data?.application.app_version ?? "—"} />
         <MetricCard label="Git Commit" value={data?.application.git_commit?.slice(0, 12) ?? "—"} tone={data?.application.git_dirty == null ? "neutral" : data.application.git_dirty ? "negative" : "positive"} />
-        <MetricCard label="OpenD 端口" value={data?.opend.connected ? "可达" : "不可达"} tone={data?.opend.connected ? "positive" : "negative"} />
-        <MetricCard label="OpenD 地址" value={data ? `${data.opend.host}:${data.opend.port}` : "—"} />
-        <MetricCard label="SDK" value={data?.opend.sdk_version ?? "—"} tone="research" />
-        <MetricCard label="本地快照" value={data?.opend.snapshot_count?.toLocaleString() ?? "—"} />
+        <MetricCard label="默认行情源" value={data?.market_data.active_provider?.toUpperCase() ?? "—"} tone="positive" />
+        <MetricCard label="行情状态" value={data?.market_data.active.status ?? "—"} />
+        <MetricCard label="数据 SDK" value={data?.market_data.active.library_version ?? data?.opend.sdk_version ?? "—"} tone="research" />
+        <MetricCard label="本地快照" value={data?.market_data.snapshot_count?.toLocaleString() ?? "—"} />
       </div>
-      <p className="panel-footnote">连接检查：TCP 端点探测，不代表行情权限或 SDK 请求成功。最近成功保存快照：{data?.opend.last_snapshot_at ?? "尚无记录"}{data?.application.git_dirty ? " · 当前工作树含未提交修改" : ""}</p>
+      <p className="panel-footnote">Yahoo 默认无需 API Key；OpenD 仅用于可选的富途公式对账。最近成功保存快照：{data?.market_data.active.last_success_at ?? "尚无记录"}{data?.application.git_dirty ? " · 当前工作树含未提交修改" : ""}</p>
     </section>
   </div>;
 }
@@ -1222,13 +1276,13 @@ function FutuSnapshotData() {
     setError(null);
     try {
       setResult(
-        await request("/api/data/futu/snapshots", {
+        await request("/api/data/market/snapshots", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             code: resolveMarketCode(code, market),
             timeframe,
-            autype,
+            adjustment: autype === "NONE" ? "raw" : "adjusted",
             start,
           }),
         }),
@@ -1239,9 +1293,9 @@ function FutuSnapshotData() {
   };
   return (
     <section className="panel panel-research mt-4 p-4">
-      <div className="panel-title">富途 OpenD 行情快照</div>
+      <div className="panel-title">市场行情快照</div>
       <p className="mt-1 text-xs text-zinc-500">
-        仅拉取授权行情与历史 K 线；每次生成不可覆盖快照，不读取账户或交易数据。
+        默认使用 Yahoo Finance 拉取历史 K 线；每次生成不可覆盖快照，不读取账户或交易数据。
       </p>
       <div className="data-toolbar mt-3 flex gap-2">
         <MarketCodeInput
@@ -1266,7 +1320,6 @@ function FutuSnapshotData() {
           onChange={(e) => setAutype(e.target.value)}
         >
           <option value="QFQ">前复权 QFQ</option>
-          <option value="HFQ">后复权 HFQ</option>
           <option value="NONE">不复权</option>
         </select>
         <input
@@ -1286,7 +1339,7 @@ function FutuSnapshotData() {
         </p>
       )}
       {error && (
-        <p className="mt-3 text-xs text-rose-300">OpenD 拉取失败：{error}</p>
+        <p className="mt-3 text-xs text-rose-300">行情拉取失败：{error}</p>
       )}
     </section>
   );
@@ -1300,6 +1353,7 @@ export default function App() {
   );
   const [checking, setChecking] = useState(false);
   const [alertError, setAlertError] = useState<string | null>(null);
+  const initialAlertRefreshStarted = useRef(false);
   const marketAlerts = useQuery<MarketAlertSnapshot>({
     queryKey: ["market-volatility-alerts"],
     queryFn: () => request("/api/market-volatility-alerts"),
@@ -1343,11 +1397,10 @@ export default function App() {
   useEffect(() => {
     if ("Notification" in window && Notification.permission === "default")
       void Notification.requestPermission();
+    if (initialAlertRefreshStarted.current) return;
+    initialAlertRefreshStarted.current = true;
     void checkAlerts();
-  }, []);
-  useEffect(() => {
-    if (page === "overview") void checkAlerts();
-  }, [page, checkAlerts]);
+  }, [checkAlerts]);
   const openNews = useCallback((code: string) => {
     setNewsContext(previous => ({ code, openDetails: true, key: previous.key + 1 }));
     setPage("news");
