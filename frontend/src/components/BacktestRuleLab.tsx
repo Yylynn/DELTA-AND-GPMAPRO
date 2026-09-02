@@ -6,12 +6,14 @@ import {
 } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { Play } from "lucide-react";
-import { backtestSignalLabel } from "@/components/backtestSignalLabels";
+import { backtestDivergenceIcon, backtestSignalShortLabel } from "@/components/backtestSignalLabels";
 import type { BacktestDataset, BacktestResult, BacktestRunRequest } from "@/components/backtestResultTypes";
 import { PanelHeading } from "@/components/ui/workspace";
 
 type SignalCatalogItem = {
   code: string;
+  version: "1.0" | "2.0";
+  family: "B" | "S" | "DIVERGENCE";
   direction: "BUY" | "SELL";
   full_count: number;
 };
@@ -49,26 +51,59 @@ function SignalRulePicker({
   selected: ReadonlySet<string>;
   onToggle: (code: string) => void;
 }) {
+  const direction = signals[0]?.direction ?? "BUY";
+  const indicatorFamily = direction === "BUY" ? "B" : "S";
+  const rows = [
+    {
+      key: "1.0",
+      title: "第一版",
+      kind: `${indicatorFamily} 信号`,
+      signals: signals.filter((signal) => signal.version === "1.0" && signal.family === indicatorFamily),
+    },
+    {
+      key: "2.0",
+      title: "第二版",
+      kind: `${indicatorFamily} 信号`,
+      signals: signals.filter((signal) => signal.version === "2.0" && signal.family === indicatorFamily),
+    },
+    {
+      key: "divergence",
+      title: "背离",
+      kind: direction === "BUY" ? "底部" : "顶部",
+      signals: signals.filter((signal) => signal.family === "DIVERGENCE"),
+    },
+  ];
   return (
     <fieldset className="border border-zinc-800 p-4">
       <legend className="px-2 text-sm font-semibold text-zinc-100">{title}</legend>
       <p className="mb-3 text-xs text-zinc-500">{description}</p>
-      <div className="flex flex-wrap gap-2">
-        {signals.map((signal) => {
-          const checked = selected.has(signal.code);
-          return (
-            <button
-              type="button"
-              className={checked ? "primary-button" : "secondary-button"}
-              key={signal.code}
-              onClick={() => onToggle(signal.code)}
-              aria-pressed={checked}
-              title={`完整历史出现 ${signal.full_count} 次`}
-            >
-              {backtestSignalLabel(signal.code)} · {signal.full_count}
-            </button>
-          );
-        })}
+      <div className="space-y-3">
+        {rows.map((row) => (
+          <div className="grid gap-2 sm:grid-cols-[72px_56px_1fr]" key={row.key}>
+            <b className="pt-2 text-sm text-cyan-200">{row.title}</b>
+            <span className="pt-2 text-xs text-zinc-500">{row.kind}</span>
+            <div className="flex flex-wrap gap-2">
+              {row.signals.map((signal) => {
+                const checked = selected.has(signal.code);
+                return (
+                  <button
+                    type="button"
+                    className={checked ? "primary-button" : "secondary-button"}
+                    key={signal.code}
+                    onClick={() => onToggle(signal.code)}
+                    aria-pressed={checked}
+                    aria-label={`${backtestSignalShortLabel(signal.code)}，完整历史 ${signal.full_count} 次`}
+                    title={`完整历史出现 ${signal.full_count} 次`}
+                  >
+                    {signal.family === "DIVERGENCE"
+                      ? backtestDivergenceIcon(signal.code)
+                      : backtestSignalShortLabel(signal.code)} · {signal.full_count}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        ))}
       </div>
     </fieldset>
   );

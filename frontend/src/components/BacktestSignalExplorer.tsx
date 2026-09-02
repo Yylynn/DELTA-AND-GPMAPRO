@@ -6,7 +6,7 @@ import {
   type PreviewBar,
   type SignalEvent,
 } from "@/components/BacktestSignalChart";
-import { backtestSignalLabel } from "@/components/backtestSignalLabels";
+import { backtestDivergenceIcon, backtestSignalShortLabel } from "@/components/backtestSignalLabels";
 import type { BacktestResult } from "@/components/backtestResultTypes";
 import { PanelHeading } from "@/components/ui/workspace";
 
@@ -30,7 +30,8 @@ type LoadedSelection = {
 
 type SignalCatalogItem = {
   code: string;
-  family: "B" | "S" | "DIVERGENCE" | "DELTA";
+  version: "1.0" | "2.0";
+  family: "B" | "S" | "DIVERGENCE";
   direction: "BUY" | "SELL";
   full_count: number;
   display_count: number;
@@ -48,12 +49,75 @@ type SignalPreview = {
   bars: PreviewBar[];
   signal_catalog: SignalCatalogItem[];
   events: SignalEvent[];
-  delta: {
-    status: string | null;
-    history_confidence: string | null;
-    confirmed_point_count: number;
-  };
 };
+
+function SignalLegendColumn({
+  title,
+  direction,
+  signals,
+  visibleSignals,
+  onToggle,
+}: {
+  title: string;
+  direction: "BUY" | "SELL";
+  signals: SignalCatalogItem[];
+  visibleSignals: ReadonlySet<string>;
+  onToggle: (code: string) => void;
+}) {
+  const indicatorFamily = direction === "BUY" ? "B" : "S";
+  const rows = [
+    {
+      key: "1.0",
+      title: "第一版",
+      kind: `${indicatorFamily} 信号`,
+      signals: signals.filter((signal) => signal.direction === direction && signal.version === "1.0" && signal.family === indicatorFamily),
+    },
+    {
+      key: "2.0",
+      title: "第二版",
+      kind: `${indicatorFamily} 信号`,
+      signals: signals.filter((signal) => signal.direction === direction && signal.version === "2.0" && signal.family === indicatorFamily),
+    },
+    {
+      key: "divergence",
+      title: "背离",
+      kind: direction === "BUY" ? "底部" : "顶部",
+      signals: signals.filter((signal) => signal.direction === direction && signal.family === "DIVERGENCE"),
+    },
+  ];
+  return (
+    <section className="border border-zinc-800 p-4">
+      <h4 className="mb-4 text-base font-semibold text-zinc-100">{title}</h4>
+      <div className="space-y-3">
+        {rows.map((row) => (
+          <div className="grid gap-2 sm:grid-cols-[72px_64px_1fr]" key={row.key}>
+            <b className="pt-2 text-sm text-cyan-200">{row.title}</b>
+            <span className="pt-2 text-xs text-zinc-500">{row.kind}</span>
+            <div className="flex flex-wrap gap-2">
+              {row.signals.map((signal) => {
+                const visible = visibleSignals.has(signal.code);
+                return (
+                  <button
+                    className={visible ? "primary-button" : "secondary-button"}
+                    key={signal.code}
+                    onClick={() => onToggle(signal.code)}
+                    aria-pressed={visible}
+                    aria-label={`${backtestSignalShortLabel(signal.code)}，显示区间 ${signal.display_count} 次`}
+                    title={`完整历史 ${signal.full_count} 次`}
+                  >
+                    {signal.family === "DIVERGENCE"
+                      ? backtestDivergenceIcon(signal.code)
+                      : backtestSignalShortLabel(signal.code)} · {signal.display_count}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
 
 const requestPreview = async (datasetId: string, years: number) => {
   const response = await fetch("/api/backtest/datasets/signal-preview", {
@@ -104,13 +168,6 @@ export function BacktestSignalExplorer({
       .filter((code) => !hiddenSignals.has(code))),
     [hiddenSignals, preview.data?.signal_catalog],
   );
-  const groups = useMemo(() => ({
-    B: (preview.data?.signal_catalog ?? []).filter((signal) => signal.family === "B"),
-    S: (preview.data?.signal_catalog ?? []).filter((signal) => signal.family === "S"),
-    DIVERGENCE: (preview.data?.signal_catalog ?? []).filter((signal) => signal.family === "DIVERGENCE"),
-    DELTA: (preview.data?.signal_catalog ?? []).filter((signal) => signal.family === "DELTA"),
-  }), [preview.data?.signal_catalog]);
-
   const toggleSignal = (code: string) => {
     setHiddenSignals((current) => {
       const next = new Set(current);
@@ -175,7 +232,7 @@ export function BacktestSignalExplorer({
       )}
       {preview.data && (
         <>
-          <div className="mb-4 grid grid-cols-5 gap-3 text-sm">
+          <div className="mb-4 grid gap-3 text-sm md:grid-cols-3">
             <div className="border border-zinc-800 p-3">
               <span>显示区间</span>
               <b>{preview.data.range.start} 至 {preview.data.range.end}</b>
@@ -187,14 +244,6 @@ export function BacktestSignalExplorer({
             <div className="border border-zinc-800 p-3">
               <span>完整历史</span>
               <b>{preview.data.range.full_bar_count.toLocaleString()}</b>
-            </div>
-            <div className="border border-zinc-800 p-3">
-              <span>DELTA 状态</span>
-              <b>{preview.data.delta.status ?? "—"}</b>
-            </div>
-            <div className="border border-zinc-800 p-3">
-              <span>已确认 DELTA</span>
-              <b>{preview.data.delta.confirmed_point_count}</b>
             </div>
           </div>
           <BacktestSignalChart
@@ -222,32 +271,25 @@ export function BacktestSignalExplorer({
                 </button>
               </div>
             </div>
-            {(["B", "S", "DIVERGENCE", "DELTA"] as const).map((family) => (
-              <div className="mt-3 grid grid-cols-[72px_1fr] items-start gap-3" key={family}>
-                <span className="pt-2 text-xs text-zinc-500">
-                  {family === "B" ? "买入信号" : family === "S" ? "卖出信号" : family === "DIVERGENCE" ? "背离信号" : "DELTA"}
-                </span>
-                <div className="flex flex-wrap gap-2">
-                  {groups[family].map((signal) => {
-                    const visible = visibleSignals.has(signal.code);
-                    return (
-                      <button
-                        className={visible ? "primary-button" : "secondary-button"}
-                        key={signal.code}
-                        onClick={() => toggleSignal(signal.code)}
-                        aria-pressed={visible}
-                        title={`完整历史 ${signal.full_count} 次`}
-                      >
-                        {backtestSignalLabel(signal.code)} · {signal.display_count}
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-            ))}
+            <div className="grid gap-5 xl:grid-cols-2">
+              <SignalLegendColumn
+                title="买入信号"
+                direction="BUY"
+                signals={preview.data.signal_catalog}
+                visibleSignals={visibleSignals}
+                onToggle={toggleSignal}
+              />
+              <SignalLegendColumn
+                title="卖出信号"
+                direction="SELL"
+                signals={preview.data.signal_catalog}
+                visibleSignals={visibleSignals}
+                onToggle={toggleSignal}
+              />
+            </div>
           </div>
           <p className="panel-footnote">
-            B/S 与背离图标位于信号确认的收盘日，下一交易日才可交易；DELTA LOW/HIGH 标记位于确认后的可交易日。图例显示或隐藏信号不会触发重新计算。
+            第一版与第二版 B/S 使用完整历史独立计算；一级至三级背离采用统一信号。所有标记位于信号确认的收盘日，下一交易日才可交易。图例显示或隐藏信号不会触发重新计算。
           </p>
           <Suspense fallback={<p className="mt-6 border-t border-zinc-800 pt-6 text-sm text-zinc-500">正在加载回测规则界面…</p>}>
             <BacktestRuleLab

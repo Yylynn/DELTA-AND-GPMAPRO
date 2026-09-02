@@ -219,7 +219,7 @@ class BacktestRuleEngine:
         if max_hold < 1:
             raise ValueError("max holding bars must be positive")
 
-        calculated, dataset, events, full_counts, _ = self.signals.calculate_all(dataset_id)
+        calculated, dataset, events, full_counts = self.signals.calculate_all(dataset_id)
         catalog = self.signals.describe_signals(full_counts)
         signal_directions = {item["code"]: item["direction"] for item in catalog}
         known = set(full_counts)

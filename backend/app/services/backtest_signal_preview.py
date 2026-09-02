@@ -1,28 +1,61 @@
 """Signal-enriched OHLCV preview for the new backtest laboratory."""
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import pandas as pd
 
-from app.quant.delta_time import ITDDeltaEngine
-from app.services.gpmaapro_engine import GpmaAproEngine, SIGNALS
+from app.services.gpmaapro_engine import GpmaAproEngine, SIGNALS as V2_SIGNAL_COLUMNS
+from app.services.gpmapro_engine import GpmaProEngine
 
 
-BUY_SIGNALS = tuple(code for code in SIGNALS if code.startswith("b"))
-SELL_SIGNALS = tuple(code for code in SIGNALS if code.startswith("s"))
-DELTA_SIGNALS = ("DELTA_LOW", "DELTA_HIGH")
-DIVERGENCE_SIGNALS = (
-    ("BOTTOM_FACE", "bottom_1_y", "BUY"),
-    ("TOP_FACE", "top_1_y", "SELL"),
-    ("BOTTOM_ARROW_2", "bottom_2_y", "BUY"),
-    ("TOP_ARROW_2", "top_2_y", "SELL"),
+V1_SIGNAL_COLUMNS = ("b1", "b2", "b3", "s1", "s2")
+
+
+@dataclass(frozen=True)
+class SignalDefinition:
+    code: str
+    column: str
+    version: str
+    family: str
+    direction: str
+
+
+def _indicator_definitions(
+    version: str,
+    columns: tuple[str, ...],
+    aliases: dict[str, str] | None = None,
+) -> tuple[SignalDefinition, ...]:
+    names = aliases or {}
+    return tuple(
+        SignalDefinition(
+            code=f"V{version[0]}_{names.get(column, column).upper()}",
+            column=column,
+            version=version,
+            family="B" if column.startswith("b") else "S",
+            direction="BUY" if column.startswith("b") else "SELL",
+        )
+        for column in columns
+    )
+
+
+SIGNAL_DEFINITIONS = (
+    *_indicator_definitions("1.0", V1_SIGNAL_COLUMNS),
+    SignalDefinition("V1_BOTTOM_FACE", "bottom_face_y", "1.0", "DIVERGENCE", "BUY"),
+    SignalDefinition("V1_TOP_FACE", "top_face_y", "1.0", "DIVERGENCE", "SELL"),
+    SignalDefinition("V1_BOTTOM_ARROW_2", "bottom_arrow_2_y", "1.0", "DIVERGENCE", "BUY"),
+    SignalDefinition("V1_TOP_ARROW_2", "top_arrow_2_y", "1.0", "DIVERGENCE", "SELL"),
+    SignalDefinition("V1_BOTTOM_ARROW_3", "bottom_arrow_3_y", "1.0", "DIVERGENCE", "BUY"),
+    SignalDefinition("V1_TOP_ARROW_3", "top_arrow_3_y", "1.0", "DIVERGENCE", "SELL"),
+    *_indicator_definitions("2.0", V2_SIGNAL_COLUMNS, {"b3": "b031", "s2": "s021"}),
 )
 
 
 class BacktestSignalPreviewService:
-    def __init__(self, catalog, gpma=None, delta=None):
+    def __init__(self, catalog, gpma_v1=None, gpma_v2=None):
         self.catalog = catalog
-        self.gpma = gpma or GpmaAproEngine()
-        self.delta = delta or ITDDeltaEngine()
+        self.gpma_v1 = gpma_v1 or GpmaProEngine()
+        self.gpma_v2 = gpma_v2 or GpmaAproEngine()
 
     @staticmethod
     def _bar(row) -> dict:
@@ -40,31 +73,14 @@ class BacktestSignalPreviewService:
         shown = full_counts if display_counts is None else display_counts
         return [
             {
-                "code": signal.upper(),
-                "family": "B" if signal in BUY_SIGNALS else "S",
-                "direction": "BUY" if signal in BUY_SIGNALS else "SELL",
-                "full_count": full_counts[signal.upper()],
-                "display_count": shown[signal.upper()],
+                "code": definition.code,
+                "version": definition.version,
+                "family": definition.family,
+                "direction": definition.direction,
+                "full_count": full_counts[definition.code],
+                "display_count": shown[definition.code],
             }
-            for signal in SIGNALS
-        ] + [
-            {
-                "code": code,
-                "family": "DIVERGENCE",
-                "direction": direction,
-                "full_count": full_counts[code],
-                "display_count": shown[code],
-            }
-            for code, _, direction in DIVERGENCE_SIGNALS
-        ] + [
-            {
-                "code": code,
-                "family": "DELTA",
-                "direction": "BUY" if code == "DELTA_LOW" else "SELL",
-                "full_count": full_counts[code],
-                "display_count": shown[code],
-            }
-            for code in DELTA_SIGNALS
+            for definition in SIGNAL_DEFINITIONS
         ]
 
     def calculate_all(self, dataset_id: str):
@@ -73,95 +89,64 @@ class BacktestSignalPreviewService:
         if dataset["timeframe"] != "1d":
             raise ValueError("signal preview requires daily bars")
 
-        calculated = self.gpma.calculate(bars).copy().reset_index(drop=True)
-        calculated["date"] = pd.to_datetime(calculated.date)
+        calculated_by_version = {
+            "1.0": self.gpma_v1.calculate(bars).copy().reset_index(drop=True),
+            "2.0": self.gpma_v2.calculate(bars).copy().reset_index(drop=True),
+        }
+        for calculated_version in calculated_by_version.values():
+            calculated_version["date"] = pd.to_datetime(calculated_version.date)
+        calculated = calculated_by_version["2.0"]
+        if not calculated_by_version["1.0"].date.equals(calculated.date):
+            raise ValueError("GPMAPRO 1.0 and 2.0 produced different trading calendars")
         dates = calculated.date.dt.date.tolist()
         events: list[dict] = []
         full_counts: dict[str, int] = {}
 
-        for signal in SIGNALS:
-            code = signal.upper()
-            direction = "BUY" if signal in BUY_SIGNALS else "SELL"
-            indexes = [int(index) for index, active in calculated[signal].items() if bool(active)]
-            full_counts[code] = len(indexes)
+        for definition in SIGNAL_DEFINITIONS:
+            version_data = calculated_by_version[definition.version]
+            if definition.family == "DIVERGENCE":
+                # Use each formula's final DRAWICON coordinate rather than a
+                # raw intermediate condition, preserving its own filters.
+                indexes = [
+                    int(index)
+                    for index, marker_y in version_data[definition.column].items()
+                    if pd.notna(marker_y)
+                ]
+            else:
+                indexes = [
+                    int(index)
+                    for index, active in version_data[definition.column].items()
+                    if bool(active)
+                ]
+            full_counts[definition.code] = len(indexes)
             for index in indexes:
                 signal_date = dates[index].isoformat()
                 events.append({
-                    "code": code,
-                    "family": "B" if direction == "BUY" else "S",
-                    "direction": direction,
+                    "code": definition.code,
+                    "version": definition.version,
+                    "family": definition.family,
+                    "direction": definition.direction,
                     "signal_date": signal_date,
                     "marker_date": signal_date,
                     "tradable_on": dates[index + 1].isoformat() if index + 1 < len(dates) else None,
                     "actual_date": signal_date,
                     "confirmed_on": signal_date,
-                    "price": float(calculated.low.iloc[index] if direction == "BUY" else calculated.high.iloc[index]),
+                    "price": float(
+                        version_data[definition.column].iloc[index]
+                        if definition.family == "DIVERGENCE"
+                        else version_data.low.iloc[index]
+                        if definition.direction == "BUY"
+                        else version_data.high.iloc[index]
+                    ),
                     "structure_price": None,
                 })
 
-        for code, column, direction in DIVERGENCE_SIGNALS:
-            # The *_y columns are the final DRAWICON conditions after the
-            # engine's de-duplication and candle/EMA filters.  The raw
-            # top_1/bottom_1/top_2/bottom_2 flags are intentionally not used.
-            indexes = [
-                int(index)
-                for index, marker_y in calculated[column].items()
-                if pd.notna(marker_y)
-            ]
-            full_counts[code] = len(indexes)
-            for index in indexes:
-                signal_date = dates[index].isoformat()
-                events.append({
-                    "code": code,
-                    "family": "DIVERGENCE",
-                    "direction": direction,
-                    "signal_date": signal_date,
-                    "marker_date": signal_date,
-                    "tradable_on": dates[index + 1].isoformat() if index + 1 < len(dates) else None,
-                    "actual_date": signal_date,
-                    "confirmed_on": signal_date,
-                    "price": float(calculated[column].iloc[index]),
-                    "structure_price": None,
-                })
-
-        delta_analysis = self.delta.analyze(bars)
-        delta_counts = {code: 0 for code in DELTA_SIGNALS}
-        date_positions = {value.isoformat(): index for index, value in enumerate(dates)}
-        for point in delta_analysis.get("confirmed_points", []):
-            tradable_on = point.get("tradable_on")
-            if not tradable_on or tradable_on not in date_positions:
-                continue
-            event_type = str(point["type"]).upper()
-            code = f"DELTA_{event_type}"
-            if code not in delta_counts:
-                continue
-            index = date_positions[tradable_on]
-            direction = "BUY" if event_type == "LOW" else "SELL"
-            delta_counts[code] += 1
-            events.append({
-                "code": code,
-                "family": "DELTA",
-                "direction": direction,
-                "signal_date": point["actual_date"],
-                "marker_date": tradable_on,
-                "tradable_on": tradable_on,
-                "actual_date": point["actual_date"],
-                "confirmed_on": point.get("confirmed_on"),
-                "price": float(calculated.low.iloc[index] if direction == "BUY" else calculated.high.iloc[index]),
-                "structure_price": float(point["price"]),
-            })
-        full_counts.update(delta_counts)
-
-        return calculated, dataset, events, full_counts, delta_analysis
+        return calculated, dataset, events, full_counts
 
     def build(self, dataset_id: str, years: int = 2) -> dict:
         if years not in {1, 2}:
             raise ValueError("preview years must be 1 or 2")
-        calculated, dataset, events, full_counts, delta_analysis = self.calculate_all(dataset_id)
-        delta_counts = {
-            code: full_counts.get(code, 0)
-            for code in DELTA_SIGNALS
-        }
+        calculated, dataset, events, full_counts = self.calculate_all(dataset_id)
 
         display_end = calculated.date.iloc[-1]
         display_start = display_end - pd.DateOffset(years=years)
@@ -174,11 +159,7 @@ class BacktestSignalPreviewService:
         ]
         display_counts = {
             code: sum(event["code"] == code for event in visible_events)
-            for code in (
-                *[signal.upper() for signal in SIGNALS],
-                *[code for code, _, _ in DIVERGENCE_SIGNALS],
-                *DELTA_SIGNALS,
-            )
+            for code in (definition.code for definition in SIGNAL_DEFINITIONS)
         }
         signal_catalog = self.describe_signals(full_counts, display_counts)
 
@@ -194,16 +175,10 @@ class BacktestSignalPreviewService:
             "bars": [self._bar(row) for row in display.itertuples(index=False)],
             "signal_catalog": signal_catalog,
             "events": visible_events,
-            "delta": {
-                "status": delta_analysis.get("status"),
-                "history_confidence": delta_analysis.get("history_confidence"),
-                "confirmed_point_count": sum(delta_counts.values()),
-            },
             "assumptions": {
                 "indicator_signal": "signal is known after its session close",
                 "indicator_tradable_on": "next available session",
-                "divergence_signal": "final filtered DRAWICON point is known after its session close",
-                "delta_marker": "confirmed DELTA point is plotted on tradable_on, never on the retrospective extreme date",
-                "calculation": "signals are calculated on full history before the display range is sliced",
+                "divergence_signal": "each formula version uses its final filtered DRAWICON point after session close",
+                "calculation": "GPMAPRO 1.0 and 2.0 are calculated on the same full history before display slicing",
             },
         }

@@ -17,6 +17,28 @@ preview_service = BacktestSignalPreviewService(catalog)
 rule_engine = BacktestRuleEngine(preview_service)
 
 
+_BACKTEST_SIGNAL_LABELS = {
+    "BOTTOM_FACE": "底部一级背离",
+    "TOP_FACE": "顶部一级背离",
+    "BOTTOM_ARROW_2": "底部二级背离",
+    "TOP_ARROW_2": "顶部二级背离",
+    "BOTTOM_ARROW_3": "底部三级背离",
+    "TOP_ARROW_3": "顶部三级背离",
+}
+
+
+def _signal_label(code: str) -> str:
+    if code.startswith("V1_"):
+        version, signal = "第一版", code[3:]
+    elif code.startswith("V2_"):
+        version, signal = "第二版", code[3:]
+    else:
+        return _BACKTEST_SIGNAL_LABELS.get(code, code)
+    if signal in _BACKTEST_SIGNAL_LABELS:
+        return _BACKTEST_SIGNAL_LABELS[signal]
+    return f"{version} {_BACKTEST_SIGNAL_LABELS.get(signal, signal)}"
+
+
 class BacktestDatasetLoadRequest(BaseModel):
     dataset_ids: list[str] = Field(min_length=1, max_length=20)
 
@@ -96,9 +118,12 @@ def export_backtest_rules(request: BacktestRuleRunRequest):
         actions.setdefault(date, []).append(action)
 
     for trade in result["closed_trades"]:
-        add_action(trade["entry_date"], f"买入 {' + '.join(trade['entry_signals'])}")
+        add_action(
+            trade["entry_date"],
+            f"买入 {' + '.join(_signal_label(code) for code in trade['entry_signals'])}",
+        )
         exit_label = (
-            " + ".join(trade["exit_signals"])
+            " + ".join(_signal_label(code) for code in trade["exit_signals"])
             if trade["exit_signals"]
             else "最大持有期限"
         )
@@ -109,7 +134,7 @@ def export_backtest_rules(request: BacktestRuleRunRequest):
     if open_position:
         add_action(
             open_position["entry_date"],
-            f"买入 {' + '.join(open_position['entry_signals'])}",
+            f"买入 {' + '.join(_signal_label(code) for code in open_position['entry_signals'])}",
         )
         add_action(open_position["last_date"], "持仓中（未实现）")
         profit_and_loss[open_position["last_date"]] = float(open_position["unrealized_pnl"])

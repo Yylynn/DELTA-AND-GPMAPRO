@@ -4,9 +4,8 @@ from fastapi.testclient import TestClient
 from app.main import app
 from app.services.backtest_signal_preview import (
     BacktestSignalPreviewService,
-    DIVERGENCE_SIGNALS,
+    SIGNAL_DEFINITIONS,
 )
-from app.services.gpmaapro_engine import SIGNALS
 
 
 def bars(count: int = 600) -> pd.DataFrame:
@@ -37,14 +36,37 @@ class FakeCatalog:
         }
 
 
-class FakeGpma:
+def blank_calculation(frame: pd.DataFrame, version: str) -> pd.DataFrame:
+    result = frame.copy()
+    for definition in SIGNAL_DEFINITIONS:
+        if definition.version != version:
+            continue
+        result[definition.column] = (
+            float("nan") if definition.family == "DIVERGENCE" else False
+        )
+    return result
+
+
+class FakeGpmaV1:
     def calculate(self, frame: pd.DataFrame) -> pd.DataFrame:
-        result = frame.copy()
-        for signal in SIGNALS:
-            result[signal] = False
-        for _, column, _ in DIVERGENCE_SIGNALS:
-            result[column] = float("nan")
+        result = blank_calculation(frame, "1.0")
+        result.loc[[0, len(result) - 11], "b1"] = True
+        result.loc[len(result) - 4, "s2"] = True
+        result.loc[len(result) - 10, "bottom_face_y"] = result.loc[len(result) - 10, "low"]
+        result.loc[len(result) - 9, "top_face_y"] = result.loc[len(result) - 9, "high"]
+        result.loc[len(result) - 8, "bottom_arrow_2_y"] = result.loc[len(result) - 8, "low"]
+        result.loc[len(result) - 7, "top_arrow_2_y"] = result.loc[len(result) - 7, "high"]
+        result.loc[len(result) - 6, "bottom_arrow_3_y"] = result.loc[len(result) - 6, "low"]
+        result.loc[len(result) - 5, "top_arrow_3_y"] = result.loc[len(result) - 5, "high"]
+        return result
+
+
+class FakeGpmaV2:
+    def calculate(self, frame: pd.DataFrame) -> pd.DataFrame:
+        result = blank_calculation(frame, "2.0")
         result.loc[[0, len(result) - 10], "b11"] = True
+        result.loc[len(result) - 9, "b3"] = True
+        result.loc[len(result) - 4, "s2"] = True
         result.loc[len(result) - 5, "s12"] = True
         result.loc[[1, len(result) - 9], "bottom_1_y"] = result.loc[
             [1, len(result) - 9], "low"
@@ -55,60 +77,46 @@ class FakeGpma:
         return result
 
 
-class FakeDelta:
-    def __init__(self, frame: pd.DataFrame):
-        self.frame = frame
-
-    def analyze(self, _frame: pd.DataFrame) -> dict:
-        dates = self.frame.date.tolist()
-        return {
-            "status": "READY",
-            "history_confidence": "LIMITED",
-            "confirmed_points": [{
-                "id": "delta-test-low",
-                "type": "LOW",
-                "actual_date": dates[-20],
-                "confirmed_on": dates[-15],
-                "tradable_on": dates[-14],
-                "price": float(self.frame.low.iloc[-20]),
-            }],
-        }
+def preview_service(frame: pd.DataFrame) -> BacktestSignalPreviewService:
+    return BacktestSignalPreviewService(
+        FakeCatalog(frame),
+        gpma_v1=FakeGpmaV1(),
+        gpma_v2=FakeGpmaV2(),
+    )
 
 
 def test_signal_preview_calculates_full_history_before_slicing_display_range():
     frame = bars()
-    result = BacktestSignalPreviewService(
-        FakeCatalog(frame), gpma=FakeGpma(), delta=FakeDelta(frame)
-    ).build("local_csv:US.TEST", years=1)
+    result = preview_service(frame).build("local_csv:US.TEST", years=1)
 
     catalog = {item["code"]: item for item in result["signal_catalog"]}
     assert result["range"]["full_bar_count"] == 600
     assert 250 <= result["range"]["display_bar_count"] <= 263
-    assert catalog["B11"]["full_count"] == 2
-    assert catalog["B11"]["display_count"] == 1
-    assert catalog["S12"]["display_count"] == 1
-    assert catalog["BOTTOM_FACE"]["full_count"] == 2
-    assert catalog["BOTTOM_FACE"]["display_count"] == 1
-    assert catalog["TOP_FACE"]["display_count"] == 1
-    assert catalog["BOTTOM_ARROW_2"]["display_count"] == 1
-    assert catalog["TOP_ARROW_2"]["display_count"] == 1
-    assert set(catalog) == {
-        *(signal.upper() for signal in SIGNALS),
-        *(code for code, _, _ in DIVERGENCE_SIGNALS),
-        "DELTA_LOW",
-        "DELTA_HIGH",
-    }
+    assert catalog["V1_B1"]["full_count"] == 2
+    assert catalog["V1_B1"]["display_count"] == 1
+    assert catalog["V1_BOTTOM_ARROW_3"]["display_count"] == 1
+    assert catalog["V2_B11"]["full_count"] == 2
+    assert catalog["V2_B11"]["display_count"] == 1
+    assert catalog["V2_B031"]["display_count"] == 1
+    assert catalog["V2_S021"]["display_count"] == 1
+    assert catalog["V2_S12"]["display_count"] == 1
+    assert catalog["V1_BOTTOM_FACE"]["full_count"] == 1
+    assert catalog["V1_BOTTOM_FACE"]["display_count"] == 1
+    assert "V2_BOTTOM_FACE" not in catalog
+    assert "V2_BOTTOM_ARROW_2" not in catalog
+    assert "V2_S2" not in catalog
+    assert set(catalog) == {definition.code for definition in SIGNAL_DEFINITIONS}
+    assert {item["version"] for item in catalog.values()} == {"1.0", "2.0"}
 
 
 def test_divergence_preview_uses_final_drawicon_columns_and_next_session():
     frame = bars()
-    result = BacktestSignalPreviewService(
-        FakeCatalog(frame), gpma=FakeGpma(), delta=FakeDelta(frame)
-    ).build("local_csv:US.TEST", years=2)
+    result = preview_service(frame).build("local_csv:US.TEST", years=2)
 
-    event = next(item for item in result["events"] if item["code"] == "BOTTOM_FACE")
-    expected_index = len(frame) - 9
+    event = next(item for item in result["events"] if item["code"] == "V1_BOTTOM_FACE")
+    expected_index = len(frame) - 10
     assert event["family"] == "DIVERGENCE"
+    assert event["version"] == "1.0"
     assert event["direction"] == "BUY"
     assert event["signal_date"] == frame.date.iloc[expected_index]
     assert event["marker_date"] == frame.date.iloc[expected_index]
@@ -116,26 +124,9 @@ def test_divergence_preview_uses_final_drawicon_columns_and_next_session():
     assert event["price"] == frame.low.iloc[expected_index]
 
 
-def test_delta_preview_marks_the_confirmed_tradable_date_not_the_extreme_date():
-    frame = bars()
-    result = BacktestSignalPreviewService(
-        FakeCatalog(frame), gpma=FakeGpma(), delta=FakeDelta(frame)
-    ).build("local_csv:US.TEST", years=2)
-
-    event = next(item for item in result["events"] if item["code"] == "DELTA_LOW")
-    assert event["signal_date"] == frame.date.iloc[-20]
-    assert event["actual_date"] == frame.date.iloc[-20]
-    assert event["confirmed_on"] == frame.date.iloc[-15]
-    assert event["marker_date"] == frame.date.iloc[-14]
-    assert event["tradable_on"] == frame.date.iloc[-14]
-    assert event["marker_date"] != event["actual_date"]
-
-
 def test_signal_preview_rejects_ranges_outside_one_or_two_years():
     frame = bars()
-    service = BacktestSignalPreviewService(
-        FakeCatalog(frame), gpma=FakeGpma(), delta=FakeDelta(frame)
-    )
+    service = preview_service(frame)
 
     try:
         service.build("local_csv:US.TEST", years=3)
@@ -149,9 +140,7 @@ def test_signal_preview_api_returns_the_chart_contract(monkeypatch):
     from app.api import backtest_datasets as dataset_api
 
     frame = bars()
-    service = BacktestSignalPreviewService(
-        FakeCatalog(frame), gpma=FakeGpma(), delta=FakeDelta(frame)
-    )
+    service = preview_service(frame)
     monkeypatch.setattr(dataset_api, "preview_service", service)
 
     response = TestClient(app).post(
@@ -160,4 +149,4 @@ def test_signal_preview_api_returns_the_chart_contract(monkeypatch):
     )
 
     assert response.status_code == 200
-    assert {"dataset", "range", "bars", "signal_catalog", "events", "delta", "assumptions"} == set(response.json())
+    assert {"dataset", "range", "bars", "signal_catalog", "events", "assumptions"} == set(response.json())

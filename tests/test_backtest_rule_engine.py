@@ -8,17 +8,11 @@ from app.main import app
 from app.services.backtest_rule_engine import BacktestRuleEngine
 from app.services.backtest_signal_preview import (
     BacktestSignalPreviewService,
-    DELTA_SIGNALS,
-    DIVERGENCE_SIGNALS,
+    SIGNAL_DEFINITIONS,
 )
-from app.services.gpmaapro_engine import SIGNALS
 
 
-ALL_CODES = (
-    *(signal.upper() for signal in SIGNALS),
-    *(code for code, _, _ in DIVERGENCE_SIGNALS),
-    *DELTA_SIGNALS,
-)
+ALL_CODES = tuple(definition.code for definition in SIGNAL_DEFINITIONS)
 
 
 def bars() -> pd.DataFrame:
@@ -70,19 +64,19 @@ class FakeSignals:
             "bar_count": len(frame),
             "data_sha256": "abc",
         }
-        return frame, dataset, self.events, counts, {"status": "READY"}
+        return frame, dataset, self.events, counts
 
 
 def test_rule_engine_executes_selected_signals_on_next_session_open():
     engine = BacktestRuleEngine(FakeSignals([
-        event("B01", "BUY", 0, 1),
-        event("S01", "SELL", 3, 4),
+        event("V2_B01", "BUY", 0, 1),
+        event("V2_S01", "SELL", 3, 4),
     ]))
 
     result = engine.run(
         "local_csv:US.TEST",
-        buy_signals=["B01"],
-        sell_signals=["S01"],
+        buy_signals=["V2_B01"],
+        sell_signals=["V2_S01"],
         initial_capital=100.0,
         commission_bps_per_side=0,
         slippage_bps_per_side=0,
@@ -107,12 +101,12 @@ def test_rule_engine_executes_selected_signals_on_next_session_open():
 
 
 def test_rule_engine_uses_max_holding_bars_as_a_causal_fallback():
-    engine = BacktestRuleEngine(FakeSignals([event("B01", "BUY", 0, 1)]))
+    engine = BacktestRuleEngine(FakeSignals([event("V2_B01", "BUY", 0, 1)]))
 
     result = engine.run(
         "local_csv:US.TEST",
-        buy_signals=["B01"],
-        sell_signals=["S01"],
+        buy_signals=["V2_B01"],
+        sell_signals=["V2_S01"],
         commission_bps_per_side=0,
         slippage_bps_per_side=0,
         max_holding_bars=2,
@@ -126,20 +120,20 @@ def test_rule_engine_uses_max_holding_bars_as_a_causal_fallback():
 
 def test_rule_engine_charges_commission_and_adverse_slippage_per_side():
     engine = BacktestRuleEngine(FakeSignals([
-        event("B01", "BUY", 0, 1),
-        event("S01", "SELL", 3, 4),
+        event("V2_B01", "BUY", 0, 1),
+        event("V2_S01", "SELL", 3, 4),
     ]))
     free = engine.run(
         "local_csv:US.TEST",
-        buy_signals=["B01"],
-        sell_signals=["S01"],
+        buy_signals=["V2_B01"],
+        sell_signals=["V2_S01"],
         commission_bps_per_side=0,
         slippage_bps_per_side=0,
     )
     costed = engine.run(
         "local_csv:US.TEST",
-        buy_signals=["B01"],
-        sell_signals=["S01"],
+        buy_signals=["V2_B01"],
+        sell_signals=["V2_S01"],
         commission_bps_per_side=10,
         slippage_bps_per_side=10,
     )
@@ -155,8 +149,8 @@ def test_rule_engine_rejects_a_sell_signal_in_the_buy_rule():
     try:
         engine.run(
             "local_csv:US.TEST",
-            buy_signals=["S01"],
-            sell_signals=["S02"],
+            buy_signals=["V2_S01"],
+            sell_signals=["V2_S02"],
         )
     except ValueError as error:
         assert "non-buy" in str(error)
@@ -168,22 +162,22 @@ def test_rule_engine_api_returns_auditable_result(monkeypatch):
     from app.api import backtest_datasets as dataset_api
 
     engine = BacktestRuleEngine(FakeSignals([
-        event("BOTTOM_FACE", "BUY", 0, 1),
-        event("TOP_FACE", "SELL", 3, 4),
+        event("V1_BOTTOM_FACE", "BUY", 0, 1),
+        event("V1_TOP_FACE", "SELL", 3, 4),
     ]))
     monkeypatch.setattr(dataset_api, "rule_engine", engine)
 
     response = TestClient(app).post("/api/backtest/rules/run", json={
         "dataset_id": "local_csv:US.TEST",
-        "buy_signals": ["BOTTOM_FACE"],
-        "sell_signals": ["TOP_FACE"],
+        "buy_signals": ["V1_BOTTOM_FACE"],
+        "sell_signals": ["V1_TOP_FACE"],
         "commission_bps_per_side": 0,
         "slippage_bps_per_side": 0,
     })
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["closed_trades"][0]["entry_signals"] == ["BOTTOM_FACE"]
+    assert payload["closed_trades"][0]["entry_signals"] == ["V1_BOTTOM_FACE"]
     assert len(payload["run_fingerprint"]) == 64
     assert {"metrics", "equity_curve", "drawdown_curve", "monthly_returns", "closed_trades", "assumptions"} <= set(payload)
 
@@ -192,14 +186,14 @@ def test_rule_engine_csv_export_is_a_clear_operation_equity_ledger(monkeypatch):
     from app.api import backtest_datasets as dataset_api
 
     engine = BacktestRuleEngine(FakeSignals([
-        event("B01", "BUY", 0, 1),
-        event("S01", "SELL", 3, 4),
+        event("V2_B01", "BUY", 0, 1),
+        event("V2_S01", "SELL", 3, 4),
     ]))
     monkeypatch.setattr(dataset_api, "rule_engine", engine)
     request = {
         "dataset_id": "local_csv:US.TEST",
-        "buy_signals": ["B01"],
-        "sell_signals": ["S01"],
+        "buy_signals": ["V2_B01"],
+        "sell_signals": ["V2_S01"],
         "commission_bps_per_side": 0,
         "slippage_bps_per_side": 0,
     }
@@ -219,7 +213,7 @@ def test_rule_engine_csv_export_is_a_clear_operation_equity_ledger(monkeypatch):
     trade = result["closed_trades"][0]
     entry = next(row for row in rows if row["时间"] == trade["entry_date"])
     exit_row = next(row for row in rows if row["时间"] == trade["exit_date"])
-    assert entry["操作"] == "买入 B01"
+    assert entry["操作"] == "买入 第二版 B01"
     assert entry["盈利/亏损"] == ""
-    assert exit_row["操作"] == "卖出 S01"
+    assert exit_row["操作"] == "卖出 第二版 S01"
     assert exit_row["盈利/亏损"] == f"{trade['pnl']:+.2f}"

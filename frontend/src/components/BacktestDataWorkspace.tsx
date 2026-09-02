@@ -408,7 +408,7 @@ export function BacktestDataWorkspace() {
         <section className="panel backtest-workspace-panel border-dashed opacity-70">
           <PanelHeading
             title="④ K 线与信号预览"
-            description="完成数据加载后，将在这里计算最新 B/S 与 DELTA 信号，并展示最近一年或两年的交互式 K 线。"
+            description="完成数据加载后，将在这里计算最新 B/S 与背离信号，并展示最近一年或两年的交互式 K 线。"
             meta="等待数据集"
           />
         </section>
