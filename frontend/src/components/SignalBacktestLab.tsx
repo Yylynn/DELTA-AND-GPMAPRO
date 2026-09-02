@@ -16,7 +16,7 @@ export function SignalBacktestLab() {
   const [symbols, setSymbols] = useState("VXN"); const [market, setMarket] = useState<Market>("US"); const [cost, setCost] = useState(10); const [horizon, setHorizon] = useState("10"); const [source, setSource] = useState<"futu" | "local">("futu");
   const parsedSymbols = useMemo(() => resolveMarketCodes(symbols, market), [symbols, market]);
   const symbolList = parsedSymbols.codes;
-  const snapshots = useQuery<{ snapshots: Snapshot[] }>({ queryKey: ["futu-snapshots"], queryFn: async () => { const response = await fetch("/api/data/futu/snapshots"); if (!response.ok) throw new Error(await response.text()); return response.json(); }, retry: false });
+  const snapshots = useQuery<{ snapshots: Snapshot[] }>({ queryKey: ["market-snapshots"], queryFn: async () => { const response = await fetch("/api/data/market/snapshots"); if (!response.ok) throw new Error(await response.text()); return response.json(); }, retry: false });
   const snapshotId = source === "futu" && symbolList.length === 1 ? snapshots.data?.snapshots.find(item => item.code === symbolList[0] && item.timeframe === "1d" && item.autype === "QFQ")?.snapshot_id : undefined;
   const payload = { symbols: symbolList, cost_bps_per_side: cost, horizon: Number(horizon), ...(snapshotId ? { snapshot_id: snapshotId } : {}) };
   // Always research all pre-registered horizons so the comparison card can

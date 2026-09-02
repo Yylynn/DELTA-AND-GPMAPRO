@@ -10,7 +10,6 @@ import pandas as pd
 
 from app.quant.delta_time import ITDConfig, ITDDeltaEngine
 from app.services.data_freshness import freshness_snapshot
-from app.services.futu_gpmapro_trace import FutuGpmaProTraceClient
 from app.services.gpmaapro_engine import GpmaAproEngine, SIGNALS as GPMA2_SIGNALS
 from app.services.gpmapro_engine import GpmaProEngine
 from app.services.news_advice import ACTION_GUIDANCE, ACTION_LABEL, apply_news_overlay
@@ -134,20 +133,14 @@ class SignalInterpretationService:
 
     @staticmethod
     def _gpma2_authority(data: pd.DataFrame, symbol: str, timeframe: str) -> tuple[str, str | None]:
-        """Read the saved Futu script fingerprint; final drawings fall back locally."""
+        """Report local GPMA2 provenance without touching OpenD at request time.
+
+        Futu reconciliation is an explicit offline workflow.  A missing OpenD
+        process must never block the current action recommendation.
+        """
         if timeframe != "1d":
             return "UNAVAILABLE", None
-        try:
-            result = FutuGpmaProTraceClient().calculate(data, symbol=symbol, short_name="GPMA2")
-            # OpenD currently exposes the GMMA output lines but zeroes drawing
-            # primitives, so local final-node reconstruction is explicitly
-            # labelled rather than presented as a Futu reconciliation result.
-            return "LOCAL_RENDERER_FALLBACK", result.script_sha256
-        except (ImportError, RuntimeError):
-            # GPMA2 has a causal local renderer.  OpenD unavailability affects
-            # reconciliation provenance, not the ability to expose a clearly
-            # labelled research-grade signal such as S01.
-            return "LOCAL_RENDERER_FALLBACK", None
+        return "LOCAL_RENDERER_FALLBACK", None
 
     def interpret(self, bars: pd.DataFrame, symbol: str, timeframe: str, source: dict, as_of: str | None = None, *, _authority: tuple[str, str | None] | None = None, _include_audit: bool = True, _include_news: bool = True, _skip_gpma2: bool = False, _precomputed_gpma1: pd.DataFrame | None = None, _precomputed_gpma2: pd.DataFrame | None = None) -> dict:
         data = bars.copy().sort_values("date").reset_index(drop=True)

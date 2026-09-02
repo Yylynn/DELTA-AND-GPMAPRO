@@ -26,11 +26,13 @@ py -3.12 -m venv .venv-local
 .\.venv-local\Scripts\python.exe -m pip install -e .\backend[dev]
 ```
 
-OpenD 行情功能还需要 Futu Python SDK。上述安装命令会自动安装它；若页面提示 `Futu Python SDK is not installed`，说明后端不是由项目启动脚本使用的虚拟环境启动。关闭该后端后重新运行 `02_启动开发版.bat`，或在实际运行后端的环境中执行：
+默认行情源为 Yahoo Finance，无需 API Key 或本地行情进程。首次拉取需要联网；行情会保存为带 SHA-256 的本地不可变研究快照。Yahoo/yfinance 仅适合个人研究，请勿把抓取后的行情文件提交到 Git 或重新分发。
+
+如需使用富途 MyLang 公式复算与对账，可选安装 Futu SDK、启动本地 OpenD，并在 `.env` 设置 `DELTA_MARKET_DATA_PROVIDER=futu`：
 
 ```powershell
 cd backend
-..\.venv-local\Scripts\python.exe -m pip install -e .[dev]
+..\.venv-local\Scripts\python.exe -m pip install -e .[dev,futu]
 ```
 
 ## 验证

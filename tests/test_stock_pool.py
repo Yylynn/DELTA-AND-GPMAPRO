@@ -7,6 +7,7 @@ from app.services.stock_pool import (
     MARKET_CAP_FLOOR_USD,
     PAIR_GAP_TRADING_DAYS,
     FutuStockPoolDataService,
+    YahooStockPoolDataService,
     StockPoolService,
 )
 
@@ -30,6 +31,24 @@ def bars():
 def test_snapshot_batches_are_limited_to_400():
     chunks = list(FutuStockPoolDataService._chunks([str(i) for i in range(801)]))
     assert [len(chunk) for chunk in chunks] == [400, 400, 1]
+
+
+def test_yahoo_stock_pool_uses_versioned_universe_and_normalises_market_cap(tmp_path):
+    class FastInfo:
+        last_price = 100
+        market_cap = 50_000_000_000
+        shares = 500_000_000
+
+    class Ticker:
+        fast_info = FastInfo()
+
+    service = YahooStockPoolDataService(tmp_path, ticker_factory=lambda _: Ticker())
+    universe = service.fetch_universe()
+    assert {"US.SPY", "US.AAPL"}.issubset({item["code"] for item in universe})
+    snapshots, health = service.fetch_market_snapshots(["US.AAPL"])
+    assert snapshots["US.AAPL"]["market_cap_usd"] == 50_000_000_000
+    assert snapshots["US.AAPL"]["issued_shares"] == 500_000_000
+    assert health == {"batches": 1, "failed_batches": 0}
 
 
 def test_pair_gap_uses_trading_sessions_and_merges_same_day_markers(monkeypatch, tmp_path):

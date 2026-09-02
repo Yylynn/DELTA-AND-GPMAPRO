@@ -116,7 +116,7 @@ class GpmaAproEngine:
         data["b01"] = data.b01_raw&(count("b01",5)<2)&(count("b02",5)<1)
         data["b02"] = data.b02_raw&(count("b02",5)<2); data["b03"] = data.b03_raw&(count("b03",5)<2)&(count("b01",5)<1)&(count("b02",5)<1)
         data["b11"] = data.b11_raw&(count("b11",5)<2)&(count("b4",5)<1); data["b12"] = data.b12_raw&(count("b12",5)<2)&(count("b4",5)<1)
-        data["b3"] = data.b3_raw&(count("b3",5)<2)&(count("b12",5)<1)&(count("b4",5)<1); data["b4"] = data.b4_raw&(count("b4",5)<2)&(count("b02",5)<1)&((count("b4",5)<2)|(count("s12",5)>=1))
+        data["b3"] = data.b3_raw&(count("b3",5)<2)&(count("b12",5)<1)&(count("b4",5)<1)&(count("b11",5)<1); data["b4"] = data.b4_raw&(count("b4",5)<2)&(count("b02",5)<1)&((count("b4",5)<2)|(count("s12",5)>=1))
         data["s01"] = data.s01_raw&(count("s01",5)<2); data["s02"] = data.s02_raw&(count("s02",5)<2)
         data["s11"] = data.s11_raw&(count("s11",5)<2)&(count("s12",6)<1)&(count("s2",6)<1)
         data["s12"] = data.s12_raw&(count("s12",6)<2)&(count("s2",5)<1)&(count("s11",6)<2)&(count("s22",5)<1)
@@ -128,9 +128,12 @@ class GpmaAproEngine:
         tbl2=(data.dea>0)&(high>rt.ref(rt.hhv(high,10,"HHV_H_10"),2,"KH"))&(data.macd<rt.ref(rt.hhv(data.macd,10,"HHV_MACD_10"),2,"MACDH"))&(data.macd<data.macd.shift(1))&((close-open_).shift(1)>0)&(low>e(8))&(open_>close)
         bbl2=(data.dea<0)&(low<rt.ref(rt.llv(low,10,"LLV_L_10"),2,"KL"))&(data.macd>rt.ref(rt.llv(data.macd,10,"LLV_MACD_10"),2,"MACDL"))&(data.macd>data.macd.shift(1))&((close-open_).shift(1)<0)&(high<e(8))&(open_<close)
         data["top_1"],data["bottom_1"],data["top_2"],data["bottom_2"]=tbl1,bbl1,tbl2,bbl2
-        for key in SIGNALS: data[f"{key}_label_y"]=(low-.5*data.atr_26).where(data[key])
+        for key in SIGNALS:
+            anchor = low - .5 * data.atr_26 if key.startswith("b") else high + .5 * data.atr_26
+            data[f"{key}_label_y"] = anchor.where(data[key])
         data["top_1_y"]=(close+1.5*data.atr_26).where(tbl1&(rt.count(tbl1,5,"COUNT_TBL1_5")<2)&(close>e(10))&(close<open_)); data["bottom_1_y"]=(close-1.5*data.atr_26).where(bbl1&(rt.count(bbl1,5,"COUNT_BBL1_5")<2)&(close<e(10))&(close>open_)); data["top_2_y"]=(open_+.3*data.atr_26).where(tbl2&(rt.count(tbl2,5,"COUNT_TBL2_5")<2)); data["bottom_2_y"]=(low-.3*data.atr_26).where(bbl2&(rt.count(bbl2,5,"COUNT_BBL2_5")<2))
-        for name, value in rt.trace.items():
-            if name not in data: data[name]=value
+        missing_trace = {name: value for name, value in rt.trace.items() if name not in data}
+        if missing_trace:
+            data = pd.concat([data, pd.DataFrame(missing_trace, index=data.index)], axis=1)
         for key in [*SIGNALS, *[f"{x}_raw" for x in SIGNALS], "top_1", "bottom_1", "top_2", "bottom_2"]: data[key]=data[key].fillna(False).astype(bool)
         return data

@@ -477,6 +477,9 @@ export function TerminalChart({
   deltaAnalysis,
   gpma = [],
   gpma2 = [],
+  gpma2Status,
+  gpma2Loading = false,
+  gpma2Error,
   layer = "gpmapro",
   focusDate,
   compact = false,
@@ -489,6 +492,9 @@ export function TerminalChart({
   deltaAnalysis?: DeltaAnalysis;
   gpma?: GpmaSeries[];
   gpma2?: GpmaSeries[];
+  gpma2Status?: "not_reconciled" | "matched" | "drift";
+  gpma2Loading?: boolean;
+  gpma2Error?: string;
   layer?: ChartLayer;
   focusDate?: string;
   /** Keeps the full chart interaction but uses the overview command-center height. */
@@ -1017,7 +1023,7 @@ export function TerminalChart({
           <Layers3 size={15} strokeWidth={1.6} />
           <span>
             {selectedLayer === "gpma2"
-              ? "富途 GPMA2 + DELTA"
+              ? "GPMA2 + DELTA"
               : selectedLayer === "delta"
                 ? "DELTA 主图"
                 : "富途 GPMAPRO + DELTA"}
@@ -1149,7 +1155,16 @@ export function TerminalChart({
             </span>
             <span>黄色哭脸 / 笑脸：一级顶 / 底背离</span>
             <span>橙色 / 绿色箭头：二级顶 / 底背离</span>
-            <span>GPMA2：富途逐 bar 权威输出</span>
+            <span>
+              GPMA2：{gpma2Loading
+                ? "本地计算中"
+                : gpma2Status === "matched"
+                  ? "本地计算 · 已与富途对账"
+                  : gpma2Status === "drift"
+                    ? "本地计算 · 与富途存在偏差"
+                    : "本地计算 · 未与富途对账"}
+            </span>
+            {gpma2Error && <span className="text-rose-300">GPMA2 加载失败：{gpma2Error}</span>}
           </>
         )}
       </div>

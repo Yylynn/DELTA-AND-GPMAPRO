@@ -46,3 +46,8 @@ def test_s01_uses_completed_body_average_and_previous_bull_midpoint():
     # 107 is below 100 + 110, but not below their midpoint.  This protects
     # against applying / 2 to the boolean comparison instead of to the sum.
     assert not bool(price_reversal.iloc[20])
+def test_gpmaapro_prefix_is_unchanged_when_future_bars_are_appended():
+    source = bars(220)
+    prefix = GpmaAproEngine().calculate(source.iloc[:160])
+    full = GpmaAproEngine().calculate(source)
+    pd.testing.assert_frame_equal(prefix, full.iloc[:160].reset_index(drop=True))
