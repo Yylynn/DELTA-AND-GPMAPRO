@@ -21,6 +21,36 @@ def _valuewhen(condition: pd.Series, value: pd.Series) -> pd.Series:
     return pd.Series(result, index=value.index, dtype="float64")
 
 
+def _s01_price_reversal(
+    close: pd.Series,
+    open_: pd.Series,
+    body: pd.Series,
+    rt: MaiRuntime,
+) -> tuple[pd.Series, pd.Series]:
+    """Return the MAI S01 body average and its three-way price condition."""
+    body_ma_20 = rt.ma(body, 20, "MA_BODY_20")
+    last_bull_age = rt.barslast(close > open_, "BARSLAST_CLOSE_GT_OPEN")
+    last_large_bull_age = rt.barslast(
+        (close > open_) & (body > body_ma_20),
+        "BARSLAST_LARGE_BULL",
+    )
+    last_bull_midpoint = (
+        rt.ref(open_, last_bull_age, "REF_OPEN_LAST_BULL")
+        + rt.ref(close, last_bull_age, "REF_CLOSE_LAST_BULL")
+    ) / 2
+    last_large_bull_open = rt.ref(
+        open_,
+        last_large_bull_age,
+        "REF_OPEN_LARGE_BULL",
+    )
+    price_reversal = (
+        (close < open_.shift(1))
+        | (close < last_bull_midpoint)
+        | ((close < open_) & (close < last_large_bull_open))
+    )
+    return body_ma_20, price_reversal
+
+
 class GpmaAproEngine:
     def calculate(self, bars: pd.DataFrame, as_of: str | None = None) -> pd.DataFrame:
         if not REQUIRED_COLUMNS.issubset(bars.columns):
@@ -56,9 +86,25 @@ class GpmaAproEngine:
         data["b12_raw"] = (e(20)>e(60))&(data.dea>0)&(data.dea.shift(25)<0)&(close>open_)&(data.macd>data.macd.shift(1))&(data.macd<0)&~(e(8)>e(10))
         data["b3_raw"] = (e(20)>e(60))&(data.dea>0)&(close>open_)&((open_<e(20))|(low<e(20))|(open_.shift(1)<e(20)))&(close>e(20))&~high.eq(rt.hhv(high,15,"HHV_HIGH_15"))&(data.macd>data.macd.shift(1))
         data["b4_raw"] = (e(40)>e(45))&(e(45)>e(50))&(e(50)>e(55))&(e(55)>e(60))&(e(20)>e(60))&(data.macd>data.macd.shift(1))&~high.eq(rt.hhv(high,10,"HHV_HIGH_10"))&(close>open_)&((open_<e(60))|(low<e(60))|(low.shift(1)<e(60)))&(close>e(60))
-        last_bull_age = rt.barslast(close>open_, "BARSLAST_CLOSE_GT_OPEN")
-        last_large_bull_age = rt.barslast((close>open_) & (body > body.rolling(20,min_periods=1).mean()), "BARSLAST_LARGE_BULL")
-        data["s01_raw"] = (data.dea>0)&(data.macd>0)&(data.macd<data.macd.shift(1))&(open_>close)&(low>e(8))&(body>body.rolling(20,min_periods=1).mean()*.6)&((close<open_.shift(1))|(close<rt.ref(open_,last_bull_age,"REF_OPEN_LAST_BULL")+rt.ref(close,last_bull_age,"REF_CLOSE_LAST_BULL"))/2|((close<open_)&(close<rt.ref(open_,last_large_bull_age,"REF_OPEN_LARGE_BULL"))))&pd.concat([high.shift(i).eq(rt.hhv(high,20,"HHV_HIGH_20_S01")) for i in range(5)],axis=1).any(axis=1)&(data.dea.shift(5)>0)
+        body_ma_20, s01_price_reversal = _s01_price_reversal(close, open_, body, rt)
+        recent_high_20 = pd.concat(
+            [
+                high.shift(i).eq(rt.hhv(high, 20, "HHV_HIGH_20_S01"))
+                for i in range(5)
+            ],
+            axis=1,
+        ).any(axis=1)
+        data["s01_raw"] = (
+            (data.dea > 0)
+            & (data.macd > 0)
+            & (data.macd < data.macd.shift(1))
+            & (open_ > close)
+            & (low > e(8))
+            & (body > body_ma_20 * .6)
+            & s01_price_reversal
+            & recent_high_20
+            & (data.dea.shift(5) > 0)
+        )
         data["s02_raw"] = high.eq(rt.hhv(high,5,"HHV_HIGH_5"))&(data.macd<data.macd.shift(1))&(data["diff"]>0)&(data.dea.shift(10)<0)&high.eq(rt.hhv(high,10,"HHV_HIGH_10_S02"))&~((e(8)>e(10))&(e(10)>e(12))&(e(12)>e(15))&(e(15)>e(20)))
         bear_stack = (e(8)<e(10))&(e(10)<e(12))&(e(12)<e(15))&(e(15)<e(20))
         data["s11_raw"] = (((e(20)<e(60))&(e(55)<e(60)))|((e(15)<e(20))&(e(20)<e(60))))&(data.dea<0)&(data.macd>0)&(open_>close)&((close-low)/body_safe<1.5)&((open_>e(60))|(high>e(60))|(high.shift(1)>e(60)))&(close<e(60))&~low.eq(rt.llv(low,10,"LLV_LOW_10"))&~bear_stack

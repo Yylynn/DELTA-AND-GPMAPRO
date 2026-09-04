@@ -23,6 +23,7 @@ from app.api.portfolio_backtest import router as portfolio_backtest_router
 from app.api.walk_forward import router as walk_forward_router
 from app.api.strategy_lab import router as strategy_lab_router
 from app.api.signal_rules import router as signal_rules_router
+from app.api.backtest_datasets import router as backtest_datasets_router
 from app.api.market_alerts import router as market_alerts_router
 from app.api.news import router as news_router
 from app.api.options import router as options_router
@@ -107,6 +108,7 @@ app.include_router(portfolio_backtest_router, prefix="/api")
 app.include_router(walk_forward_router, prefix="/api")
 app.include_router(strategy_lab_router, prefix="/api")
 app.include_router(signal_rules_router, prefix="/api")
+app.include_router(backtest_datasets_router, prefix="/api")
 app.include_router(market_alerts_router, prefix="/api")
 app.include_router(news_router, prefix="/api")
 app.include_router(options_router, prefix="/api")
