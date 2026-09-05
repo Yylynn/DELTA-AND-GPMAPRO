@@ -15,10 +15,23 @@ def test_earliest_trade_is_next_valid_nyse_open_across_holiday_and_dst() -> None
     assert earliest_trade_at("2026-11-06T20:00:00Z").startswith("2026-11-09T09:30:00-05:00")
 
 
-def test_chinese_news_is_not_scored_by_english_finbert() -> None:
-    result = NewsAnalyzer().analyze("苹果公司发布新产品")
+def test_chinese_news_degrades_to_topic_only_without_local_model() -> None:
+    result = NewsAnalyzer(enable_zh=False).analyze("苹果公司发布新产品")
     assert result["language"] == "ZH"
-    assert result["method"] == "UNSUPPORTED_LANGUAGE"
+    assert result["method"] == "ZH_TOPIC_ONLY"
+    assert result["event_type"] == "PRODUCT"
+    assert result["model_eligible"] is False
+
+
+def test_chinese_finbert_maps_publisher_labels_and_stays_research_only(monkeypatch) -> None:
+    analyzer = NewsAnalyzer()
+    monkeypatch.setattr(analyzer, "_zh_finbert", lambda: lambda _: [[
+        {"label": "LABEL_0", "score": .05}, {"label": "LABEL_1", "score": .9}, {"label": "LABEL_2", "score": .05},
+    ]])
+    result = analyzer.analyze("公司业绩大幅增长并上调指引")
+    assert result["method"] == "ZH_FINBERT"
+    assert result["direction"] == "BULLISH"
+    assert result["event_type"] == "EARNINGS"
     assert result["model_eligible"] is False
 
 

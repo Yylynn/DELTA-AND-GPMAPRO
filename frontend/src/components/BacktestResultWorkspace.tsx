@@ -18,7 +18,7 @@ export function BacktestResultWorkspace({
             className="secondary-button inline-flex items-center gap-2"
             onClick={onBack}
           >
-            <ArrowLeft size={14} /> 返回数据、K 线与规则
+            <ArrowLeft size={14} /> 返回股票、K 线与规则
           </button>
           <BacktestResultPanel result={result} stale={false} />
         </div>

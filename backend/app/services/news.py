@@ -23,12 +23,13 @@ from app.services.trading_calendar import earliest_trade_at
 
 
 MARKET_HEADLINE_SOURCES = (
-    {"id": "all", "label": "全部头条", "source_ids": ("wallstreetcn", "cnbc", "marketwatch", "fed_press", "treasury_press", "coindesk")},
+    {"id": "all", "label": "全部头条", "source_ids": ("wallstreetcn", "cnbc", "marketwatch", "fed_press", "treasury_press", "coindesk", "cointelegraph", "decrypt", "theblock")},
     {"id": "wallstreetcn", "label": "华尔街见闻", "source_ids": ("wallstreetcn",)},
     {"id": "cnbc", "label": "CNBC", "source_ids": ("cnbc",)},
     {"id": "marketwatch", "label": "MarketWatch", "source_ids": ("marketwatch",)},
     {"id": "official", "label": "官方发布", "source_ids": ("fed_press", "treasury_press")},
     {"id": "coindesk", "label": "CoinDesk", "source_ids": ("coindesk",)},
+    {"id": "crypto", "label": "加密资讯", "source_ids": ("cointelegraph", "decrypt", "theblock")},
 )
 
 
@@ -313,7 +314,7 @@ def normalize_records(rows: list[dict[str, Any]], symbol: str) -> list[dict[str,
 
 
 class NewsService:
-    def __init__(self, cache_dir: Path, ttl_seconds: int = 900, provider: NewsProvider | None = None, now: Callable[[], datetime] | None = None, *, sources: tuple[NewsSource, ...] | None = None, rss_timeout_seconds: float = 15, finnhub_api_key: str = "", sec_user_agent: str = "DELTA-Research-Terminal/0.1 research@example.invalid") -> None:
+    def __init__(self, cache_dir: Path, ttl_seconds: int = 900, provider: NewsProvider | None = None, now: Callable[[], datetime] | None = None, *, sources: tuple[NewsSource, ...] | None = None, rss_timeout_seconds: float = 15, finnhub_api_key: str = "", sec_user_agent: str = "DELTA-Research-Terminal/0.1 research@example.invalid", zh_sentiment_enabled: bool = True) -> None:
         self.cache_dir, self.ttl = cache_dir, timedelta(seconds=max(0, ttl_seconds))
         self.sources = sources or enabled_sources()
         self.health: dict[str, dict[str, Any]] = {
@@ -327,7 +328,7 @@ class NewsService:
             for source in self.sources
         }
         self.provider = provider or DefaultNewsProvider(self.sources, rss_timeout_seconds, self._mark_health, finnhub_api_key=finnhub_api_key, sec_user_agent=sec_user_agent)
-        self._now, self.analyzer = now or (lambda: datetime.now(timezone.utc)), NewsAnalyzer()
+        self._now, self.analyzer = now or (lambda: datetime.now(timezone.utc)), NewsAnalyzer(enable_zh=zh_sentiment_enabled)
         self._market_refresh_lock = Lock()
         self._last_market_refresh_monotonic = float("-inf")
 
@@ -400,7 +401,7 @@ class NewsService:
                 source = next((candidate for candidate in self.sources if candidate.source_id == item.get("source_id")), None) or resolve_source(item["publisher"])
                 if not source or source.source_id not in allowed or source.scope != "MARKET": continue
                 raw_summary = item["summary"]
-                item.update(source_id=source.source_id, source=source.display_name, license_status=source.authorization, allow_summary=source.allow_summary, entity_status="ACCEPTED", entity_matches=[], scope="MARKET")
+                item.update(source_id=source.source_id, source=source.display_name, license_status=source.authorization, allowed_fields=list(source.allowed_fields), allow_summary=source.allow_summary, entity_status="ACCEPTED", entity_matches=[], scope="MARKET")
                 item["summary"] = raw_summary if source.allow_summary else None
                 item["analysis"] = self.analyzer.analyze(item["title"], raw_summary, item.get("event_type_hint"))
                 item["language"] = item["analysis"]["language"]
@@ -455,7 +456,7 @@ class NewsService:
             terms = entity_terms(symbol) if item["scope"] == "COMPANY" else ()
             matched = [term for term in terms if re.search(rf"(?<![a-z0-9]){re.escape(term.casefold())}(?![a-z0-9])", text)]
             if symbol.upper() in {str(value).upper() for value in item.get("entity_tickers", [])} and symbol.casefold() not in matched: matched.append(symbol.casefold())
-            item.update(source_id=source.source_id, source=source.display_name, license_status=source.authorization, allow_summary=source.allow_summary, entity_status="ACCEPTED" if item["scope"] == "MARKET" or matched else "REJECTED_ENTITY_MISMATCH", entity_matches=matched, scope=source.scope)
+            item.update(source_id=source.source_id, source=source.display_name, license_status=source.authorization, allowed_fields=list(source.allowed_fields), allow_summary=source.allow_summary, entity_status="ACCEPTED" if item["scope"] == "MARKET" or matched else "REJECTED_ENTITY_MISMATCH", entity_matches=matched, scope=source.scope)
             item["summary"] = raw_summary if source.allow_summary else None
             item["analysis"] = self.analyzer.analyze(item["title"], raw_summary, item.get("event_type_hint"))
             item["language"] = item["analysis"]["language"]

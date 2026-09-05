@@ -25,10 +25,25 @@ class FakeTicker:
         )
 
 
+class RepairFallbackTicker(FakeTicker):
+    def __init__(self):
+        super().__init__()
+        self.calls = []
+
+    def history(self, **kwargs):
+        self.calls.append(kwargs)
+        if kwargs["repair"]:
+            error = ModuleNotFoundError("No module named 'sklearn'")
+            error.name = "sklearn"
+            raise error
+        return super().history(**kwargs)
+
+
 def test_yahoo_code_mapping_and_validation(tmp_path):
     service = YahooSnapshotService(tmp_path, ticker_factory=lambda _: FakeTicker())
     assert service.normalise_code("AAPL") == ("US.AAPL", "AAPL")
     assert service.normalise_code("HK.700") == ("HK.700", "0700.HK")
+    assert service.normalise_code("HK.00700") == ("HK.00700", "0700.HK")
     assert service.normalise_code("SH.600519") == ("SH.600519", "600519.SS")
     assert service.normalise_code("SZ.000001") == ("SZ.000001", "000001.SZ")
     with pytest.raises(ValueError):
@@ -65,6 +80,16 @@ def test_weekly_snapshot_is_resampled_from_daily_bars(tmp_path):
     assert frame.date.tolist() == ["2024-01-05", "2024-01-08"]
     assert frame.volume.tolist() == [600, 400]
     assert manifest["daily_source_bar_count"] == 4
+
+
+def test_yahoo_snapshot_retries_without_repair_when_sklearn_is_missing(tmp_path):
+    ticker = RepairFallbackTicker()
+    service = YahooSnapshotService(tmp_path, ticker_factory=lambda _: ticker)
+
+    manifest = service.fetch_history_snapshot("SH.600519", start="2024-01-01", end="2024-01-08")
+
+    assert [call["repair"] for call in ticker.calls] == [True, False]
+    assert manifest["history_repair"] == "disabled_missing_sklearn"
 
 
 def test_market_facade_reads_legacy_futu_snapshot(tmp_path):

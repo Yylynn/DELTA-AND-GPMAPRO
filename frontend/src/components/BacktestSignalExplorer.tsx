@@ -180,7 +180,7 @@ export function BacktestSignalExplorer({
   return (
     <section className="panel backtest-workspace-panel">
       <PanelHeading
-        title="④ K 线与信号预览"
+        title="② K 线与信号预览"
         description="先用完整历史计算信号，再截取最近区间显示；图例只控制可见性，不会改变已加载数据。"
         meta="收盘确认 · 下一交易日可交易"
       />

@@ -173,7 +173,7 @@ export function BacktestRuleLab({
   return (
     <div className="backtest-rule-lab border-t border-zinc-800">
       <PanelHeading
-        title="⑤ 回测规则与交易引擎"
+        title="③ 回测规则与交易引擎"
         description={`为 ${dataset.symbol} 选择规则。每侧勾选多个信号时采用“任一触发（OR）”。`}
         meta="单标的 · 只做多 · 次日开盘"
       />

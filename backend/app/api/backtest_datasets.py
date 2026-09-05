@@ -5,14 +5,15 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from app.api.data import futu_snapshots, provider
+from app.api.data import futu_snapshots, market_snapshots, provider
+from app.services.market_snapshot import MarketDataError
 from app.services.backtest_datasets import BacktestDatasetCatalog
 from app.services.backtest_rule_engine import BacktestRuleEngine
 from app.services.backtest_signal_preview import BacktestSignalPreviewService
 
 
 router = APIRouter(tags=["backtest-datasets"])
-catalog = BacktestDatasetCatalog(provider, futu_snapshots)
+catalog = BacktestDatasetCatalog(provider, futu_snapshots, market_snapshots)
 preview_service = BacktestSignalPreviewService(catalog)
 rule_engine = BacktestRuleEngine(preview_service)
 
@@ -41,6 +42,11 @@ def _signal_label(code: str) -> str:
 
 class BacktestDatasetLoadRequest(BaseModel):
     dataset_ids: list[str] = Field(min_length=1, max_length=20)
+
+
+class BacktestSymbolLoadRequest(BaseModel):
+    code: str = Field(min_length=1)
+    refresh: bool = False
 
 
 class BacktestSignalPreviewRequest(BaseModel):
@@ -72,6 +78,16 @@ def backtest_datasets():
             },
         }
     except ValueError as error:
+        raise HTTPException(422, str(error))
+
+
+@router.post("/backtest/symbol/load")
+def load_backtest_symbol(request: BacktestSymbolLoadRequest):
+    try:
+        return catalog.load_symbol(request.code, refresh=request.refresh)
+    except MarketDataError as error:
+        raise HTTPException(503, str(error))
+    except (FileNotFoundError, ValueError) as error:
         raise HTTPException(422, str(error))
 
 

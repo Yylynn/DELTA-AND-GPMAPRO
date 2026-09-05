@@ -30,6 +30,7 @@ def get_news_service() -> NewsService:
         rss_timeout_seconds=settings.news_rss_timeout_seconds,
         finnhub_api_key=settings.finnhub_api_key,
         sec_user_agent=settings.sec_user_agent,
+        zh_sentiment_enabled=settings.news_zh_sentiment_enabled,
     )
 
 

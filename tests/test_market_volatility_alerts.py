@@ -3,7 +3,7 @@ from datetime import UTC, datetime
 
 import pandas as pd
 
-from app.services.market_volatility_alerts import MARKET_INDEX_TECHNICAL_INDICATORS, RISK_MODULE_INDICATORS, MarketVolatilityAlertService
+from app.services.market_volatility_alerts import DEFAULT_INDICATORS, MARKET_INDEX_TECHNICAL_INDICATORS, RISK_MODULE_INDICATORS, MarketVolatilityAlertService
 
 
 def frame(previous: float, current: float) -> pd.DataFrame:
@@ -132,7 +132,54 @@ def test_unconfigured_keyed_providers_are_reported_without_startup_failure(tmp_p
     assert health["CBOE"]["status"] == "AVAILABLE"
     assert health["YAHOO_FINANCE"]["status"] == "FALLBACK"
     assert health["TWELVE_DATA"]["status"] in {"AVAILABLE", "NOT_CONFIGURED"}
-    assert health["FRED"]["status"] in {"AVAILABLE", "NOT_CONFIGURED"}
+    assert health["FRED_API"]["status"] in {"AVAILABLE", "NOT_CONFIGURED"}
+    assert health["FRED_CSV"]["status"] == "FALLBACK"
+
+
+def test_fred_csv_fallback_reads_rates_and_credit_series_without_api_key(monkeypatch, tmp_path):
+    class Response:
+        status_code = 200
+        text = "observation_date,DGS10\n2026-08-17,4.2\n2026-08-18,4.3\n"
+    service = MarketVolatilityAlertService(tmp_path)
+    monkeypatch.setattr(service, "_get", lambda *_args, **_kwargs: Response())
+
+    bars = service._fetch_fred_csv_daily_bars("DGS10")
+
+    assert list(bars.close) == [4.2, 4.3]
+    assert list(bars.date) == ["2026-08-17", "2026-08-18"]
+
+
+def test_missing_core_credit_spread_downgrades_display_regime_to_data_pending(tmp_path):
+    dates = pd.date_range("2025-01-01", periods=260, freq="B")
+    def bars(start: float, end: float) -> pd.DataFrame:
+        return pd.DataFrame({"date": dates, "close": [start + (end - start) * i / 259 for i in range(260)]})
+    values = {item["code"]: bars(100, 105) for item in DEFAULT_INDICATORS + MARKET_INDEX_TECHNICAL_INDICATORS + RISK_MODULE_INDICATORS}
+    values.pop("BAMLH0A0HYM2"); values.pop("BAMLC0A0CM")
+    service = MarketVolatilityAlertService(tmp_path, fetcher=lambda code: values[code], now=lambda: datetime(2026, 12, 1, 22, tzinfo=UTC))
+
+    service.check()
+    snapshot = service.snapshot()
+
+    assert snapshot["raw_regime"] in {"NORMAL", "WATCH", "RISK", "CRISIS"}
+    assert snapshot["display_regime"] == "DATA_PENDING"
+    assert "信用与流动性" in snapshot["data_health"]["missing_core"]
+
+
+def test_methodology_exposes_recomputable_directional_contributions(tmp_path):
+    dates = pd.date_range("2025-01-01", periods=260, freq="B")
+    def bars(start: float, end: float) -> pd.DataFrame:
+        return pd.DataFrame({"date": dates, "close": [start + (end - start) * i / 259 for i in range(260)]})
+    values = {item["code"]: bars(100, 105) for item in DEFAULT_INDICATORS + MARKET_INDEX_TECHNICAL_INDICATORS + RISK_MODULE_INDICATORS}
+    service = MarketVolatilityAlertService(tmp_path, fetcher=lambda code: values[code], now=lambda: datetime(2026, 12, 1, 22, tzinfo=UTC))
+
+    service.check()
+    snapshot = service.snapshot()
+    rate = next(item for item in snapshot["modules"] if item["id"] == "RATES")
+    evidence = rate["evidence"][0]
+
+    assert snapshot["methodology"]["history_sessions"] == 252
+    assert {"historical_percentile", "five_day_change", "trend"}.issubset(evidence["contributions"])
+    assert rate["score"] == round(min(100, max(0, sum(evidence["contributions"].values()))))
 
 
 def test_all_final_gpmapro_markers_become_deduplicated_technical_alerts(monkeypatch, tmp_path):

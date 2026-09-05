@@ -114,7 +114,7 @@ export function BacktestResultPanel({ result, stale }: {
   return (
     <section className="backtest-result-content border-t border-zinc-800" aria-label="回测结果">
       <PanelHeading
-        title="⑥ 回测结果"
+        title="④ 回测结果"
         description={`${result.dataset.symbol} · ${result.period.start} 至 ${result.period.end} · ${result.period.bar_count} 根 K 线`}
         meta={`运行指纹 ${result.run_fingerprint.slice(0, 12)}`}
       />

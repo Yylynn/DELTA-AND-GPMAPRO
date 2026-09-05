@@ -30,6 +30,7 @@ from app.api.options import router as options_router
 from app.api.options import options as option_monitor
 from app.api.stock_pool import router as stock_pool_router
 from app.api.stock_pool import service as stock_pool_service
+from app.api.chanlun import router as chanlun_router
 from app.core.config import get_settings
 from app.services.news_runtime import get_news_service
 settings = get_settings()
@@ -97,6 +98,7 @@ app.include_router(gpma2_router, prefix="/api")
 app.include_router(interpretation_router, prefix="/api")
 app.include_router(volume_router, prefix="/api")
 app.include_router(itd_router, prefix="/api")
+app.include_router(chanlun_router, prefix="/api")
 app.include_router(event_backtest_router, prefix="/api")
 app.include_router(event_analytics_router, prefix="/api")
 app.include_router(evidence_router, prefix="/api")

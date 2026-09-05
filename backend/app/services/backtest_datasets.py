@@ -11,14 +11,17 @@ from app.services.dataset import eligibility, sha256_file
 
 LOCAL_PREFIX = "local_csv:"
 FUTU_PREFIX = "futu_snapshot:"
+MARKET_PREFIX = "market_snapshot:"
+BACKTEST_HISTORY_START = "2018-01-01"
 
 
 class BacktestDatasetCatalog:
     """Expose local CSV files and immutable Futu snapshots through one contract."""
 
-    def __init__(self, provider, futu_snapshots):
+    def __init__(self, provider, futu_snapshots, market_snapshots=None):
         self.provider = provider
         self.futu_snapshots = futu_snapshots
+        self.market_snapshots = market_snapshots
 
     @staticmethod
     def _freshness(end_date: str | None, bars: int) -> dict:
@@ -90,6 +93,97 @@ class BacktestDatasetCatalog:
             row["verification"] = "VERIFIED"
         return row
 
+    def _market_dataset(self, manifest: dict, *, verify: bool = False) -> dict:
+        if self.market_snapshots is None:
+            raise ValueError("market snapshot service is unavailable")
+        snapshot_id = str(manifest.get("snapshot_id", ""))
+        if not snapshot_id:
+            raise ValueError("Yahoo snapshot manifest is missing snapshot_id")
+        metadata = manifest
+        if verify:
+            _, metadata = self.market_snapshots.load(snapshot_id)
+        if str(metadata.get("provider", "")).lower() != "yahoo":
+            raise ValueError("backtest symbol loading only accepts Yahoo snapshots")
+        timeframe = str(metadata.get("timeframe", "")).lower()
+        bars = int(metadata.get("bar_count", 0))
+        end_date = metadata.get("end_date")
+        warnings = list(metadata.get("warnings", []))
+        if timeframe != "1d":
+            warnings.append("回测实验室第一版只支持日线数据。")
+        row = {
+            "dataset_id": f"{MARKET_PREFIX}{snapshot_id}",
+            "source": "yahoo",
+            "symbol": str(metadata.get("code", "")).upper(),
+            "timeframe": timeframe,
+            "bar_count": bars,
+            "start_date": metadata.get("start_date"),
+            "end_date": end_date,
+            "autype": metadata.get("autype"),
+            "adjustment": metadata.get("adjustment") or "adjusted",
+            "research_eligibility": eligibility(bars),
+            "quality": metadata.get("quality", "UNKNOWN"),
+            "warnings": warnings,
+            "snapshot_id": snapshot_id,
+            "data_sha256": metadata.get("data_sha256"),
+            "fetched_at": metadata.get("fetched_at"),
+            "selectable": timeframe == "1d" and bars > 0,
+            **self._freshness(str(end_date) if end_date else None, bars),
+        }
+        if verify:
+            row["verification"] = "VERIFIED"
+        return row
+
+    @staticmethod
+    def _local_snapshot_date(fetched_at: str | None):
+        if not fetched_at:
+            return None
+        value = str(fetched_at)
+        try:
+            if value.endswith("Z") and "T" in value and "-" not in value[:8]:
+                parsed = datetime.strptime(value, "%Y%m%dT%H%M%S%fZ").replace(tzinfo=UTC)
+            else:
+                parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=UTC)
+            return parsed.astimezone().date()
+        except ValueError:
+            return None
+
+    def load_symbol(self, code: str, *, refresh: bool = False) -> dict:
+        """Fetch or reuse today's Yahoo daily snapshot and load it for backtesting."""
+        if self.market_snapshots is None:
+            raise ValueError("market snapshot service is unavailable")
+        yahoo = self.market_snapshots.yahoo
+        normalised_code, _ = yahoo.normalise_code(code)
+        today = datetime.now().astimezone().date()
+        cached = next((
+            item for item in yahoo.list()
+            if str(item.get("provider", "")).lower() == "yahoo"
+            and str(item.get("code", "")).upper() == normalised_code
+            and str(item.get("timeframe", "")).lower() == "1d"
+            and str(item.get("adjustment", "")).lower() == "adjusted"
+            and item.get("requested_start") == BACKTEST_HISTORY_START
+            and self._local_snapshot_date(item.get("fetched_at")) == today
+        ), None)
+        if cached is not None and not refresh:
+            manifest = cached
+            cache_status = "HIT"
+        else:
+            manifest = yahoo.fetch_history_snapshot(
+                normalised_code,
+                timeframe="1d",
+                adjustment="adjusted",
+                start=BACKTEST_HISTORY_START,
+            )
+            cache_status = "REFRESHED" if refresh else "FETCHED"
+        result = self.load([f"{MARKET_PREFIX}{manifest['snapshot_id']}"])
+        result.update({
+            "provider": "yahoo",
+            "cache_status": cache_status,
+            "snapshot_fetched_at": manifest.get("fetched_at"),
+        })
+        return result
+
     def list(self) -> list[dict]:
         local = [self._local_dataset(symbol) for symbol in self.provider.symbols()]
         futu = [self._futu_dataset(manifest) for manifest in self.futu_snapshots.list()]
@@ -113,6 +207,16 @@ class BacktestDatasetCatalog:
                 raise ValueError("Futu dataset id is missing a snapshot id")
             frame, metadata = self.futu_snapshots.load(snapshot_id)
             row = self._futu_dataset(metadata)
+            row["verification"] = "VERIFIED"
+            return frame, row
+        if dataset_id.startswith(MARKET_PREFIX):
+            if self.market_snapshots is None:
+                raise ValueError("market snapshot service is unavailable")
+            snapshot_id = dataset_id.removeprefix(MARKET_PREFIX).strip()
+            if not snapshot_id:
+                raise ValueError("market snapshot dataset id is missing a snapshot id")
+            frame, metadata = self.market_snapshots.load(snapshot_id)
+            row = self._market_dataset(metadata)
             row["verification"] = "VERIFIED"
             return frame, row
         raise ValueError(f"unknown backtest dataset id: {dataset_id}")

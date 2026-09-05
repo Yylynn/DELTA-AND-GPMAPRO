@@ -22,6 +22,7 @@ RISK_HISTORY_LIMIT = 500
 STALE_CACHE_SECONDS = 60 * 60 * 24 * 7
 MAX_PROVIDER_WORKERS = 4
 CBOE_HISTORY_URL = "https://cdn.cboe.com/api/global/us_indices/daily_prices/{symbol}_History.csv"
+FRED_GRAPH_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv?id={series}"
 DEFAULT_INDICATORS = [
     {"id": "vix", "label": "VIX", "code": "^VIX", "watch_level": 20.0, "risk_level": 25.0},
     {"id": "vxn", "label": "VXN", "code": "^VXN", "watch_level": 25.0, "risk_level": 30.0},
@@ -87,7 +88,8 @@ class MarketVolatilityAlertService:
         return {
             "CBOE": {"status": "AVAILABLE", "configured": True},
             "TWELVE_DATA": {"status": "AVAILABLE" if settings.twelve_data_api_key else "NOT_CONFIGURED", "configured": bool(settings.twelve_data_api_key)},
-            "FRED": {"status": "AVAILABLE" if settings.fred_api_key else "NOT_CONFIGURED", "configured": bool(settings.fred_api_key)},
+            "FRED_API": {"status": "AVAILABLE" if settings.fred_api_key else "NOT_CONFIGURED", "configured": bool(settings.fred_api_key)},
+            "FRED_CSV": {"status": "FALLBACK", "configured": True},
             "YAHOO_FINANCE": {"status": "FALLBACK", "configured": True},
         }
 
@@ -97,7 +99,7 @@ class MarketVolatilityAlertService:
         probes = {
             "CBOE": lambda: self._fetch_cboe_daily_bars("VIX"),
             "TWELVE_DATA": lambda: self._fetch_twelve_daily_bars("SPY"),
-            "FRED": lambda: self._fetch_fred_daily_bars("DGS10"),
+            "FRED_CSV": lambda: self._fetch_fred_csv_daily_bars("DGS10"),
         }
         for provider, probe in probes.items():
             if providers[provider]["status"] == "NOT_CONFIGURED": continue
@@ -147,13 +149,23 @@ class MarketVolatilityAlertService:
         values = payload.get("values") or []
         return self._frame([{"date": value.get("datetime"), "open": value.get("open"), "high": value.get("high"), "low": value.get("low"), "close": value.get("close"), "volume": value.get("volume")} for value in values])
 
-    def _fetch_fred_daily_bars(self, series: str) -> pd.DataFrame:
+    def _fetch_fred_api_daily_bars(self, series: str) -> pd.DataFrame:
         key = self._settings.fred_api_key
         if not key: raise RuntimeError("FRED is not configured")
         response = self._get("https://api.stlouisfed.org/fred/series/observations", params={"series_id": series, "api_key": key, "file_type": "json", "observation_start": "2000-01-01", "sort_order": "asc"})
         payload = response.json()
         if response.status_code >= 400 or payload.get("error_code"): raise RuntimeError(f"FRED: {payload.get('error_message', response.status_code)}")
         return self._frame([{"date": value["date"], "close": value["value"]} for value in payload.get("observations", []) if value.get("value") not in (None, ".")])
+
+    def _fetch_fred_csv_daily_bars(self, series: str) -> pd.DataFrame:
+        """Official FRED graph export; available without a personal API key."""
+        response = self._get(FRED_GRAPH_URL.format(series=quote(series, safe="")))
+        if response.status_code >= 400: raise RuntimeError(f"FRED CSV request failed (HTTP {response.status_code})")
+        raw = pd.read_csv(__import__("io").StringIO(response.text))
+        columns = {str(column).strip().upper(): column for column in raw.columns}
+        date_column, value_column = columns.get("OBSERVATION_DATE"), columns.get(series.upper())
+        if not date_column or not value_column: raise RuntimeError("FRED CSV returned an unexpected historical-data format")
+        return self._frame([{"date": row[date_column], "close": row[value_column]} for _, row in raw.iterrows() if pd.notna(row[value_column]) and str(row[value_column]) != "."])
 
     def _fetch_indicator(self, indicator: dict) -> tuple[pd.DataFrame, str]:
         """Return the preferred provider's bars, falling back only on real failure."""
@@ -163,7 +175,9 @@ class MarketVolatilityAlertService:
         if indicator.get("id") in {"vix", "vxn", "vvix"}:
             attempts.append(("CBOE", lambda: self._fetch_cboe_daily_bars(indicator["id"].upper())))
         if indicator.get("fred_series"):
-            attempts.append(("FRED", lambda: self._fetch_fred_daily_bars(indicator["fred_series"])))
+            if self._settings.fred_api_key:
+                attempts.append(("FRED_API", lambda: self._fetch_fred_api_daily_bars(indicator["fred_series"])))
+            attempts.append(("FRED_CSV", lambda: self._fetch_fred_csv_daily_bars(indicator["fred_series"])))
         if indicator.get("provider_symbol") or indicator.get("id") == "vixy":
             attempts.append(("TWELVE_DATA", lambda: self._fetch_twelve_daily_bars(indicator.get("provider_symbol", indicator["code"]))))
         attempts.append(("YAHOO_FINANCE", lambda: self._fetch_yahoo_daily_bars(indicator["code"])))
@@ -212,9 +226,15 @@ class MarketVolatilityAlertService:
         active_alerts = current_volatility_alerts + technical
         index_latest = {item["id"]: item for item in state["market_index_observations"]}
         risk_state = state.get("risk_state") or {}
-        health = risk_state.get("data_health", {"status": "UNAVAILABLE", "available_modules": 0, "total_modules": len(RISK_MODULE_LABELS), "failures": [], "sources": []})
+        health = risk_state.get("data_health", {"status": "DATA_PENDING", "available_modules": 0, "total_modules": len(RISK_MODULE_LABELS), "failures": [], "sources": [], "core_checks": {}, "missing_core": list(RISK_MODULE_LABELS.values()), "indicator_sources": []})
         health.setdefault("providers", self._provider_health())
-        return {"config": state["config"], "observations": state["observations"][-20:], "alerts": alerts, "active_alerts": active_alerts, "technical_signals": volatility_technical, "market_index_technical_signals": market_index_technical, "market_index_technical_indicators": MARKET_INDEX_TECHNICAL_INDICATORS, "market_index_last_check": list(index_latest.values()), "technical_lookback_sessions": TECHNICAL_LOOKBACK_SESSIONS, "risk_score": risk_state.get("risk_score", 0), "regime": risk_state.get("regime", "NORMAL"), "modules": risk_state.get("modules", []), "evidence": risk_state.get("evidence", []), "data_health": health, "risk_history": state.get("risk_history", [])[-20:], "risk_transition": risk_state.get("transition", "等待首次检查"), "last_check": state["last_check"]}
+        # States saved before explainable completeness gating have no evidence
+        # needed to uphold a confirmed regime.  Keep their historical score for
+        # audit, but require one fresh scan before presenting a conclusion.
+        if "core_checks" not in health:
+            health = {**health, "status": "DATA_PENDING", "core_checks": {}, "missing_core": ["需刷新以核验关键模块"], "indicator_sources": []}
+        display_regime = "DATA_PENDING" if health.get("status") == "DATA_PENDING" else risk_state.get("display_regime", risk_state.get("regime", "DATA_PENDING"))
+        return {"config": state["config"], "observations": state["observations"][-20:], "alerts": alerts, "active_alerts": active_alerts, "technical_signals": volatility_technical, "market_index_technical_signals": market_index_technical, "market_index_technical_indicators": MARKET_INDEX_TECHNICAL_INDICATORS, "market_index_last_check": list(index_latest.values()), "technical_lookback_sessions": TECHNICAL_LOOKBACK_SESSIONS, "risk_score": risk_state.get("risk_score", 0), "regime": display_regime, "raw_regime": risk_state.get("raw_regime", risk_state.get("regime", "NORMAL")), "display_regime": display_regime, "modules": risk_state.get("modules", []), "evidence": risk_state.get("evidence", []), "methodology": risk_state.get("methodology", self._methodology()), "data_health": health, "risk_history": state.get("risk_history", [])[-20:], "risk_transition": risk_state.get("transition", "等待首次检查"), "last_check": state["last_check"]}
 
     def _fetch_yahoo_daily_bars(self, symbol: str) -> pd.DataFrame:
         url = f"https://query2.finance.yahoo.com/v8/finance/chart/{quote(symbol, safe='')}"
@@ -334,6 +354,23 @@ class MarketVolatilityAlertService:
         percentile = self._percentile(closes, current) if direction > 0 else self._percentile(-closes, -current)
         return {"close": round(current, 4), "percentile": percentile, "change_5d": None if change_5d is None else round(change_5d, 3), "trend": "UP" if len(closes) >= 20 and current >= float(closes.tail(20).mean()) else "DOWN"}
 
+    @staticmethod
+    def _methodology() -> dict:
+        return {
+            "version": "market-risk-v2-explainable",
+            "history_sessions": 252,
+            "change_sessions": 5,
+            "trend_sessions": 20,
+            "aggregation": "每个模块只取压力最高的一项证据；综合分为可用模块的等权平均。",
+            "regime_rules": [
+                "任一模块得分 ≥ 90：危机",
+                "至少两个模块得分 ≥ 60 且综合分 ≥ 60：高风险",
+                "综合分 ≥ 35 或存在压力模块：重点观察",
+                "其余：正常",
+            ],
+            "data_gate": "波动率、权益、利率和信用模块须有新鲜核心证据；信用模块还须至少一条官方 OAS 信用利差。否则状态为数据待确认。",
+        }
+
     def _risk_snapshot(self, frames: dict[str, pd.DataFrame], sources: dict[str, str], failures: list[dict], checked_at: str) -> dict:
         """Transparent, module-capped risk score.  Correlated volatility inputs
         contribute through their maximum stress, not their sum."""
@@ -347,6 +384,12 @@ class MarketVolatilityAlertService:
                 return
             result = scorer(available)
             module_evidence = result.pop("evidence")
+            for item in module_evidence:
+                identifier = item.get("indicator_id")
+                source = sources.get(identifier, "UNKNOWN")
+                item["source"] = source
+                if identifier in frames:
+                    item["as_of"] = str(frames[identifier].iloc[-1].date)
             weight = 1
             modules.append({"id": key, "label": RISK_MODULE_LABELS[key], "weight": weight, "status": "AVAILABLE", **result, "evidence": module_evidence})
             evidence.extend(module_evidence)
@@ -361,9 +404,9 @@ class MarketVolatilityAlertService:
                 adaptive = metric["percentile"] or 0
                 impulse = min(100, max(0, (metric["change_5d"] or 0) * 12))
                 score = round(max(absolute, adaptive, impulse))
-                items.append((score, identifier, metric, absolute > 0))
-            score, identifier, metric, absolute_hit = max(items, key=lambda item: item[0])
-            return {"score": score, "evidence": [{"module": "VOLATILITY", "indicator_id": identifier, "label": config_by_id[identifier]["label"], "value": metric["close"], "percentile": metric["percentile"], "message": "绝对阈值触发" if absolute_hit else "波动率历史分位/五日变化触发"}]}
+                items.append((score, identifier, metric, absolute, adaptive, impulse))
+            score, identifier, metric, absolute, adaptive, impulse = max(items, key=lambda item: item[0])
+            return {"score": score, "evidence": [{"module": "VOLATILITY", "indicator_id": identifier, "label": config_by_id[identifier]["label"], "value": metric["close"], "percentile": metric["percentile"], "change_5d": metric["change_5d"], "trend": metric["trend"], "contributions": {"absolute_threshold": absolute, "historical_percentile": adaptive, "five_day_impulse": round(impulse, 2)}, "formula": "max(绝对阈值, 历史分位, max(0, 五日变化 × 12))", "message": "绝对阈值触发" if absolute > 0 else "波动率历史分位/五日变化触发"}]}
 
         def equity(available):
             candidates = []
@@ -371,21 +414,23 @@ class MarketVolatilityAlertService:
                 closes = frame.close.astype(float); current = float(closes.iloc[-1]); high = float(closes.tail(252).max())
                 drawdown = max(0, (high - current) / high * 100)
                 realized = closes.pct_change().tail(20).std() * (252 ** .5) * 100 if len(closes) >= 21 else 0
-                score = min(100, drawdown * 5 + max(0, realized - 15) * 2 + (20 if len(closes) >= 50 and current < closes.tail(50).mean() else 0))
-                candidates.append((round(score), identifier, round(drawdown, 2), round(float(realized), 2)))
-            score, identifier, drawdown, realized = max(candidates)
-            return {"score": score, "evidence": [{"module": "EQUITY", "indicator_id": identifier, "label": next(x["label"] for x in MARKET_INDEX_TECHNICAL_INDICATORS if x["id"] == identifier), "drawdown_pct": drawdown, "realized_volatility_pct": realized, "message": "回撤、实现波动率与趋势共同评估"}]}
+                drawdown_points = drawdown * 5; volatility_points = max(0, realized - 15) * 2; trend_points = 20 if len(closes) >= 50 and current < closes.tail(50).mean() else 0
+                score = min(100, drawdown_points + volatility_points + trend_points)
+                candidates.append((round(score), identifier, round(drawdown, 2), round(float(realized), 2), drawdown_points, volatility_points, trend_points))
+            score, identifier, drawdown, realized, drawdown_points, volatility_points, trend_points = max(candidates)
+            return {"score": score, "evidence": [{"module": "EQUITY", "indicator_id": identifier, "label": next(x["label"] for x in MARKET_INDEX_TECHNICAL_INDICATORS if x["id"] == identifier), "drawdown_pct": drawdown, "realized_volatility_pct": realized, "contributions": {"drawdown": round(drawdown_points, 2), "realized_volatility": round(volatility_points, 2), "below_50_day_trend": trend_points}, "formula": "min(100, 回撤% × 5 + max(0, 年化20日实现波动率% − 15) × 2 + 50日均线趋势加分)", "message": "回撤、实现波动率与趋势共同评估"}]}
 
         def directional(available, key):
             candidates = []
             for identifier, frame, direction in available:
                 metric = self._frame_metric(frame, direction=direction)
                 move = (metric["change_5d"] or 0) * direction
-                score = min(100, max(0, (metric["percentile"] or 0) * .65 + move * 8 + (10 if metric["trend"] == ("UP" if direction > 0 else "DOWN") else 0)))
-                candidates.append((round(score), identifier, metric))
-            score, identifier, metric = max(candidates, key=lambda item: item[0])
+                percentile_points = (metric["percentile"] or 0) * .65; change_points = move * 8; trend_points = 10 if metric["trend"] == ("UP" if direction > 0 else "DOWN") else 0
+                score = min(100, max(0, percentile_points + change_points + trend_points))
+                candidates.append((round(score), identifier, metric, percentile_points, change_points, trend_points))
+            score, identifier, metric, percentile_points, change_points, trend_points = max(candidates, key=lambda item: item[0])
             label = next(item["label"] for item in RISK_MODULE_INDICATORS if item["id"] == identifier)
-            return {"score": score, "evidence": [{"module": key, "indicator_id": identifier, "label": label, **metric, "message": "历史分位、五日变化与趋势共同评估"}]}
+            return {"score": score, "evidence": [{"module": key, "indicator_id": identifier, "label": label, **metric, "contributions": {"historical_percentile": round(percentile_points, 2), "five_day_change": round(change_points, 2), "trend": trend_points}, "formula": "min(100, max(0, 历史分位 × 0.65 + 方向调整后五日变化 × 8 + 趋势加分))", "message": "历史分位、五日变化与趋势共同评估"}]}
 
         def global_pressure(available):
             directional_inputs = [item for item in available if item[0] not in {"oil", "gold"}]
@@ -422,8 +467,23 @@ class MarketVolatilityAlertService:
             error = str(failure.get("error", ""))
             for provider in providers:
                 if provider in error: providers[provider]["status"] = "FAILED"
-        data_health = {"status": "OK" if not failures else "PARTIAL" if available else "FAILED", "available_modules": len(available), "total_modules": len(modules), "failures": failures, "sources": sorted(set(sources.values())), "providers": providers}
-        return {"risk_score": raw_score, "regime": regime, "modules": modules, "evidence": evidence, "data_health": data_health, "transition": transition, "pending_regime": target, "pending_upgrade_count": consecutive, "checked_at": checked_at}
+        fresh = lambda identifier: identifier in frames and sources.get(identifier) != "STALE_CACHE"
+        core_checks = {
+            "VOLATILITY": any(fresh(item["id"]) for item in self._state()["config"]["indicators"]),
+            "EQUITY": fresh("sp500") or fresh("nasdaq100"),
+            "RATES": fresh("tnx"),
+            "CREDIT_LIQUIDITY": fresh("hy_oas") or fresh("ig_oas"),
+        }
+        missing_core = [RISK_MODULE_LABELS[key] for key, present in core_checks.items() if not present]
+        health_status = "DATA_PENDING" if missing_core else "FULL" if not failures else "PARTIAL"
+        display_regime = "DATA_PENDING" if health_status == "DATA_PENDING" else regime
+        if display_regime == "DATA_PENDING": transition = "数据待确认：" + "、".join(missing_core) + "缺少新鲜核心证据"
+        indicator_sources = [
+            {"id": identifier, "label": next((item["label"] for item in [*self._state()["config"]["indicators"], *MARKET_INDEX_TECHNICAL_INDICATORS, *RISK_MODULE_INDICATORS] if item["id"] == identifier), identifier), "source": source, "as_of": str(frames[identifier].iloc[-1].date), "fresh": source != "STALE_CACHE"}
+            for identifier, source in sorted(sources.items()) if identifier in frames
+        ]
+        data_health = {"status": health_status, "available_modules": len(available), "total_modules": len(modules), "failures": failures, "sources": sorted(set(sources.values())), "providers": providers, "core_checks": core_checks, "missing_core": missing_core, "indicator_sources": indicator_sources}
+        return {"risk_score": raw_score, "regime": display_regime, "raw_regime": regime, "display_regime": display_regime, "modules": modules, "evidence": evidence, "methodology": self._methodology(), "data_health": data_health, "transition": transition, "pending_regime": target, "pending_upgrade_count": consecutive, "checked_at": checked_at}
 
     def check(self) -> dict:
         state = self._state(); config = state["config"]; readings, index_observations, failures, frames, sources, pending_indicators, technical_candidates = [], [], [], {}, {}, [], []

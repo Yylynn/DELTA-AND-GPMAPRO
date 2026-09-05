@@ -37,11 +37,15 @@ def test_free_source_registry_enables_only_configured_sources() -> None:
     assert catalog["cnbc"]["enabled"] and catalog["cnbc"]["rss_url"].startswith("https://")
     assert catalog["marketwatch"]["enabled"] and catalog["marketwatch"]["collector"] == "RSS"
     assert catalog["wallstreetcn"]["enabled"] and catalog["wallstreetcn"]["rss_url"] == "https://dedicated.wallstreetcn.com/rss.xml"
+    assert catalog["cointelegraph"]["enabled"] and catalog["cointelegraph"]["allow_summary"] is False
+    assert catalog["decrypt"]["enabled"] and catalog["theblock"]["enabled"]
+    assert catalog["chaincatcher"]["enabled"] is False and catalog["chaincatcher"]["authorization"] == "PENDING_APPROVAL"
+    assert catalog["cointelegraph"]["allowed_fields"] == ["title", "url", "published_at", "thumbnail"]
     assert {
         "reuters", "bloomberg", "simuwang", "barclayhedge", "bridgewater", "morningstar",
         "eastmoney", "stcn", "10jqka", "xueqiu", "jiemian",
     }.isdisjoint(catalog)
-    assert {"marketwatch", "wallstreetcn", "fed_press", "treasury_press", "coindesk", "openbb_yfinance", "sec_edgar", "finnhub_company"} == {source.source_id for source in enabled_sources(cnbc=False)}
+    assert {"marketwatch", "wallstreetcn", "fed_press", "treasury_press", "coindesk", "cointelegraph", "decrypt", "theblock", "openbb_yfinance", "sec_edgar", "finnhub_company"} == {source.source_id for source in enabled_sources(cnbc=False)}
 
 
 def test_rss_parser_preserves_source_scope_and_published_time(monkeypatch) -> None:
@@ -54,7 +58,7 @@ def test_rss_parser_preserves_source_scope_and_published_time(monkeypatch) -> No
         def get(self, url): return Response()
     monkeypatch.setattr("app.services.news.httpx.Client", lambda **_: Client())
     rows, warnings = PublicRssNewsProvider(enabled_sources()).market_news(10)
-    assert not warnings and {row["source"] for row in rows} == {"CNBC", "MarketWatch", "华尔街见闻", "Federal Reserve", "U.S. Treasury", "CoinDesk"}
+    assert not warnings and {row["source"] for row in rows} == {"CNBC", "MarketWatch", "华尔街见闻", "Federal Reserve", "U.S. Treasury", "CoinDesk", "Cointelegraph", "Decrypt", "The Block"}
     assert all(row["scope"] == "MARKET" and row["date"] for row in rows)
     assert all(row["image"] == "https://example.com/image.jpg" for row in rows)
 
@@ -71,10 +75,25 @@ def test_market_headlines_are_grouped_by_source_and_combined_is_diverse() -> Non
     ]
     result = build_market_headlines(items, [])
     groups = {group["id"]: group for group in result["headline_groups"]}
-    assert result["source_order"] == ["all", "wallstreetcn", "cnbc", "marketwatch", "official", "coindesk"]
+    assert result["source_order"] == ["all", "wallstreetcn", "cnbc", "marketwatch", "official", "coindesk", "crypto"]
     assert [item["id"] for item in groups["wallstreetcn"]["items"]] == ["w0", "w1", "w2", "w3", "w4"]
     assert len({item["source_id"] for item in groups["all"]["items"][:5]}) == 5
     assert [item["id"] for item in groups["official"]["items"]] == ["f1"]
+
+
+def test_market_rss_metadata_is_redacted_but_retains_audit_fields(tmp_path) -> None:
+    class Provider(FakeProvider):
+        def market_news(self, limit: int):
+            return [{"title": "Bitcoin market update", "date": "2026-08-19T07:30:00Z", "source": "Cointelegraph", "url": "https://example.com/article", "summary": "RSS description must not be stored", "image": "https://example.com/image.jpg", "scope": "MARKET"}], []
+
+    result = NewsService(tmp_path, provider=Provider(), now=lambda: NOW).get_market(refresh=True)
+    item = result["market_items"][0]
+    assert item["source_id"] == "cointelegraph"
+    assert item["summary"] is None
+    assert item["url"] == "https://example.com/article"
+    assert item["thumbnail"] == "https://example.com/image.jpg"
+    assert item["allowed_fields"] == ["title", "url", "published_at", "thumbnail"]
+    assert item["factor_eligible"] is False
 
 
 def test_concurrent_market_refresh_fetches_upstream_once(tmp_path) -> None:

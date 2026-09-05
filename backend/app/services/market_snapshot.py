@@ -74,7 +74,10 @@ class YahooSnapshotService:
         elif market == "HK":
             if not symbol.isdigit():
                 raise ValueError("Hong Kong symbols must be numeric")
-            yahoo = f"{symbol.zfill(4)}.HK"
+            # The UI uses Futu-style five-digit codes (HK.00700), while Yahoo
+            # represents the same legacy listing as 0700.HK.  Preserve genuine
+            # five-digit listings and remove only redundant leading zeroes.
+            yahoo = f"{(symbol.lstrip('0') or '0').zfill(4)}.HK"
         elif market == "SH":
             yahoo = f"{symbol}.SS"
         else:
@@ -140,13 +143,26 @@ class YahooSnapshotService:
         if adjustment not in {"adjusted", "raw"}:
             raise ValueError("adjustment must be adjusted or raw")
         requested_end = end or datetime.now(UTC).date().isoformat()
+        repair_mode = "enabled"
         try:
             exclusive_end = (date.fromisoformat(requested_end) + timedelta(days=1)).isoformat()
             ticker = self._ticker(yahoo_symbol)
-            raw = ticker.history(
-                start=start, end=exclusive_end, interval="1d", actions=False,
-                auto_adjust=adjustment == "adjusted", repair=True, timeout=15, raise_errors=True,
-            )
+            history_args = {
+                "start": start,
+                "end": exclusive_end,
+                "interval": "1d",
+                "actions": False,
+                "auto_adjust": adjustment == "adjusted",
+                "timeout": 15,
+                "raise_errors": True,
+            }
+            try:
+                raw = ticker.history(**history_args, repair=True)
+            except ModuleNotFoundError as error:
+                if error.name != "sklearn":
+                    raise
+                repair_mode = "disabled_missing_sklearn"
+                raw = ticker.history(**history_args, repair=False)
         except Exception as error:
             raise MarketDataError(f"Yahoo Finance history request failed for {yahoo_symbol}: {error}") from error
         if raw is None or raw.empty:
@@ -174,6 +190,7 @@ class YahooSnapshotService:
             "autype": "QFQ" if adjustment == "adjusted" else "NONE",
             "requested_start": start, "requested_end": requested_end, "fetched_at": fetched_at,
             "data_sha256": hashlib.sha256(payload).hexdigest(), "library_version": library_version,
+            "history_repair": repair_mode,
             "daily_source_bar_count": daily_quality["bar_count"],
             "usage": "personal_research_only", **quality,
         }

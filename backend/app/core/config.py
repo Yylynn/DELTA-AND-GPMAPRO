@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     news_rss_timeout_seconds: int = 15
     news_cnbc_enabled: bool = True
     news_marketwatch_enabled: bool = True
+    news_zh_sentiment_enabled: bool = True
     finnhub_api_key: str = ""
     twelve_data_api_key: str = ""
     fred_api_key: str = ""

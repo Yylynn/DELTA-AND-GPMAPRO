@@ -9,7 +9,7 @@ import {
 } from "lightweight-charts";
 import { Expand, Layers3, Shrink, Type } from "lucide-react";
 
-export type ChartLayer = "delta" | "gpmapro" | "gpma2";
+export type ChartLayer = "delta" | "gpmapro" | "gpma2" | "chanlun";
 export type ChartBar = {
   time: string;
   open: number;
@@ -127,6 +127,16 @@ export type DeltaAnalysis = {
     }>;
   };
 };
+export type ChanlunAnalysis = {
+  status: "AVAILABLE" | "INSUFFICIENT_DATA" | "INVALID_DATA";
+  error?: string;
+  conclusion: string;
+  merged_count?: number;
+  fractals?: Array<{ kind: "top" | "bottom"; idx: number }>;
+  bis?: Array<{ start_idx: number; end_idx: number; start_price: number; end_price: number; direction: "up" | "down" }>;
+  zhongshus?: Array<{ zg: number; zd: number; start_idx: number; end_idx: number }>;
+  points?: { buy?: { type: string; price: number; idx: number } | null; sell?: { type: string; price: number; idx: number } | null };
+};
 type DeltaOverlay = {
   id: string;
   kind: "phase" | "boundary" | "point" | "forecast" | "ibp";
@@ -137,6 +147,11 @@ type DeltaOverlay = {
   dashed?: boolean;
   labelOffsetY?: number;
   detail?: string;
+};
+type ChanlunOverlay = {
+  bis: Array<{ id: string; x1: number; y1: number; x2: number; y2: number; direction: "up" | "down" }>;
+  zones: Array<{ id: string; x: number; y: number; width: number; height: number }>;
+  points: Array<{ id: string; x: number; y: number; label: string; kind: "buy" | "sell" }>;
 };
 const DELTA_COLOURS = {
   ORANGE: "#e68512",
@@ -481,6 +496,8 @@ export function TerminalChart({
   gpma2Loading = false,
   gpma2Error,
   layer = "gpmapro",
+  chanlun,
+  onLayerChange,
   focusDate,
   compact = false,
   mode,
@@ -496,6 +513,8 @@ export function TerminalChart({
   gpma2Loading?: boolean;
   gpma2Error?: string;
   layer?: ChartLayer;
+  chanlun?: ChanlunAnalysis;
+  onLayerChange?: (layer: ChartLayer) => void;
   focusDate?: string;
   /** Keeps the full chart interaction but uses the overview command-center height. */
   compact?: boolean;
@@ -508,6 +527,7 @@ export function TerminalChart({
   const [selectedLayer, setSelectedLayer] = useState<ChartLayer>(layer);
   const [overlays, setOverlays] = useState<OverlayPosition[]>([]);
   const [deltaOverlays, setDeltaOverlays] = useState<DeltaOverlay[]>([]);
+  const [chanlunOverlays, setChanlunOverlays] = useState<ChanlunOverlay>({ bis: [], zones: [], points: [] });
   const [chartError, setChartError] = useState<string | null>(null);
   const [isFocusOpen, setIsFocusOpen] = useState(false);
   const [viewportHeight, setViewportHeight] = useState(() =>
@@ -519,6 +539,10 @@ export function TerminalChart({
     : chartMode === "overview"
       ? 410
       : 560;
+
+  useEffect(() => {
+    setSelectedLayer(layer);
+  }, [layer]);
 
   useEffect(() => {
     if (!isFocusOpen) return;
@@ -543,6 +567,7 @@ export function TerminalChart({
       // Do not leave SVG formula annotations from the previous chart visible.
       setOverlays([]);
       setDeltaOverlays([]);
+      setChanlunOverlays({ bis: [], zones: [], points: [] });
       return;
     }
     const chartBars = chronologicalUnique(
@@ -556,9 +581,10 @@ export function TerminalChart({
     const chartGpma = chronologicalUnique(
       selectedLayer === "gpma2" ? gpma2 : gpma,
     );
-    if (!chartBars.length) {
+      if (!chartBars.length) {
       setOverlays([]);
       setDeltaOverlays([]);
+      setChanlunOverlays({ bis: [], zones: [], points: [] });
       setChartError("该股票没有可绘制的行情数据");
       return;
     }
@@ -932,6 +958,33 @@ export function TerminalChart({
             return { ...item, x: position.x, y: position.y };
           }),
         );
+        if (selectedLayer !== "chanlun" || chanlun?.status !== "AVAILABLE") {
+          setChanlunOverlays({ bis: [], zones: [], points: [] });
+          return;
+        }
+        const chanlunBis = (chanlun.bis ?? []).flatMap((bi, index) => {
+          const start = chartBars[bi.start_idx], end = chartBars[bi.end_idx];
+          if (!start || !end) return [];
+          const x1 = activeChart.timeScale().timeToCoordinate(start.time), y1 = candles.priceToCoordinate(bi.start_price);
+          const x2 = activeChart.timeScale().timeToCoordinate(end.time), y2 = candles.priceToCoordinate(bi.end_price);
+          return x1 == null || y1 == null || x2 == null || y2 == null ? [] : [{ id: `bi-${index}`, x1, y1, x2, y2, direction: bi.direction }];
+        });
+        const chanlunZones = (chanlun.zhongshus ?? []).flatMap((zone, index) => {
+          const start = chartBars[zone.start_idx], end = chartBars[zone.end_idx];
+          if (!start || !end) return [];
+          const left = activeChart.timeScale().timeToCoordinate(start.time), right = activeChart.timeScale().timeToCoordinate(end.time);
+          const top = candles.priceToCoordinate(zone.zg), bottom = candles.priceToCoordinate(zone.zd);
+          if (left == null || right == null || top == null || bottom == null) return [];
+          return [{ id: `zone-${index}`, x: Math.min(left, right), y: Math.min(top, bottom), width: Math.abs(right - left), height: Math.abs(bottom - top) }];
+        });
+        const chanlunPoints = (["buy", "sell"] as const).flatMap((kind) => {
+          const point = chanlun.points?.[kind];
+          const bar = point ? chartBars[point.idx] : undefined;
+          if (!point || !bar) return [];
+          const x = activeChart.timeScale().timeToCoordinate(bar.time), y = candles.priceToCoordinate(point.price);
+          return x == null || y == null ? [] : [{ id: `${kind}-${point.idx}`, x, y, label: kind === "buy" ? `B ${point.type}` : `S ${point.type}`, kind }];
+        });
+        setChanlunOverlays({ bis: chanlunBis, zones: chanlunZones, points: chanlunPoints });
       };
       const scheduleOverlayRefresh = () => {
         if (refreshFrame !== undefined)
@@ -1003,6 +1056,7 @@ export function TerminalChart({
     deltaAnalysis,
     gpma,
     gpma2,
+    chanlun,
     selectedLayer,
     focusDate,
     chartHeight,
@@ -1012,6 +1066,7 @@ export function TerminalChart({
     ["gpmapro", "GPMAPRO + DELTA"],
     ["gpma2", "GPMA2 + DELTA"],
     ["delta", "仅 DELTA"],
+    ["chanlun", "简化缠论"],
   ];
   return (
     <section
@@ -1026,7 +1081,9 @@ export function TerminalChart({
               ? "GPMA2 + DELTA"
               : selectedLayer === "delta"
                 ? "DELTA 主图"
-                : "富途 GPMAPRO + DELTA"}
+                : selectedLayer === "chanlun"
+                  ? "简化缠论"
+                  : "富途 GPMAPRO + DELTA"}
           </span>
           <small>同一 OHLCV 快照与时间轴</small>
         </div>
@@ -1035,7 +1092,7 @@ export function TerminalChart({
             {modes.map(([value, label]) => (
               <button
                 key={value}
-                onClick={() => setSelectedLayer(value)}
+                onClick={() => { setSelectedLayer(value); onLayerChange?.(value); }}
                 className={selectedLayer === value ? "active" : ""}
               >
                 {label}
@@ -1129,6 +1186,13 @@ export function TerminalChart({
               </g>
             ),
           )}
+          {selectedLayer === "chanlun" && (
+            <g className="chanlun-overlay" aria-label="简化缠论结构">
+              {chanlunOverlays.zones.map((zone) => <rect key={zone.id} x={zone.x} y={zone.y} width={zone.width} height={zone.height} className="chanlun-zone" />)}
+              {chanlunOverlays.bis.map((bi) => <line key={bi.id} x1={bi.x1} y1={bi.y1} x2={bi.x2} y2={bi.y2} className={bi.direction === "up" ? "chanlun-bi-up" : "chanlun-bi-down"} />)}
+              {chanlunOverlays.points.map((point) => <g key={point.id}><circle cx={point.x} cy={point.y} r="11" className={`chanlun-point chanlun-point-${point.kind}`} /><text x={point.x} y={point.y + 4} textAnchor="middle" className="chanlun-point-label">{point.kind === "buy" ? "B" : "S"}</text></g>)}
+            </g>
+          )}
         </svg>
       </div>
       <div className="chart-legend">
@@ -1167,6 +1231,11 @@ export function TerminalChart({
             {gpma2Error && <span className="text-rose-300">GPMA2 加载失败：{gpma2Error}</span>}
           </>
         )}
+        {selectedLayer === "chanlun" && (
+          <>
+            <span>蓝线：笔</span><span>金色区间：中枢</span><span>B / S：简化买卖点</span><span>仅美股日线；研究用途，非投资建议。</span>
+          </>
+        )}
       </div>
       {(deltaAnalysis?.transition_table ?? []).length > 0 ? (
         <DeltaTransitionTable
@@ -1187,6 +1256,13 @@ export function TerminalChart({
         <div className="chart-status">
           <span>ITW 倒转：{deltaAnalysis?.reversal?.state ?? "NORMAL"}</span>
           <small>虚线紫圈为 IBP；仅在确认日后生效。</small>
+        </div>
+      )}
+      {selectedLayer === "chanlun" && (
+        <div className="chanlun-summary">
+          <strong>简化缠论结构</strong>
+          <span>{chanlun?.status === "AVAILABLE" ? chanlun.conclusion : chanlun?.error ?? "等待日线快照与结构计算"}</span>
+          {chanlun?.status === "AVAILABLE" && <small>分型 {chanlun.fractals?.length ?? 0} · 笔 {chanlun.bis?.length ?? 0} · 中枢 {chanlun.zhongshus?.length ?? 0}。包含关系、分型、笔、中枢与简化买卖点的定义来自来源仓库的简化算法。</small>}
         </div>
       )}
     </section>
@@ -1229,20 +1305,20 @@ function DeltaTransitionTable({
   const formatDays = (value: number | null, prefix = "") =>
     value == null ? "—" : `${prefix}${value.toFixed(1)}`;
   return (
-    <div className="border-t border-zinc-700 bg-[#1b1b1b] px-5 py-5">
-      <div className="mb-4 grid gap-2 border-b border-zinc-700 pb-4">
-        <h3 className="text-base font-semibold tracking-tight text-zinc-100">
+    <section className="delta-transition-panel">
+      <div className="delta-transition-heading">
+        <h3>
           DELTA 编号转移与下次出现预测
         </h3>
-        <p className="max-w-5xl text-xs leading-5 text-zinc-400">
+        <p>
           日期按该股票历史转移间隔均值 ± 1σ 链式推演。相邻编号至少{" "}
           {minGapTradingDays} 个交易日；统计日期范围可以重叠，重叠不表示两个实际转折点同时发生。† 表示下限后移，‡
           表示当前候选已按实际边界更新。
         </p>
       </div>
-      <div className="overflow-x-auto">
-        <table className="min-w-[820px] w-full border-collapse text-center text-xs text-zinc-300">
-          <thead className="bg-[#242424] text-zinc-300">
+      <div className="delta-transition-scroll">
+        <table className="delta-transition-table">
+          <thead>
             <tr>
               <th className="border border-zinc-700 px-3 py-2">目标数字</th>
               <th className="border border-zinc-700 px-3 py-2">
@@ -1252,6 +1328,7 @@ function DeltaTransitionTable({
               <th className="border border-zinc-700 px-3 py-2">平均间隔(天)</th>
               <th className="border border-zinc-700 px-3 py-2">±1σ</th>
               <th className="border border-zinc-700 px-3 py-2">最近一次(天)</th>
+              <th>概率</th>
             </tr>
           </thead>
           <tbody>
@@ -1262,30 +1339,20 @@ function DeltaTransitionTable({
               return (
                 <tr
                   key={row.number}
-                  className={
-                    conditional
-                      ? "bg-amber-950/40 text-amber-100"
-                      : active
-                        ? "bg-[#40391f] text-[#f2e7bd]"
-                        : "bg-zinc-900"
-                  }
+                  className={`${conditional ? "is-conditional" : ""} ${active ? "is-active" : ""}`}
                 >
-                  <td
-                    className={`sticky left-0 border border-zinc-800 bg-inherit px-3 py-2 font-semibold ${active && !conditional ? "text-amber-200" : ""}`}
-                  >
+                  <td className={active && !conditional ? "is-emphasis" : ""}>
                     {row.number}
                     {active && row.number === activeNumbers[0] ? "?" : ""}
                   </td>
-                  <td
-                    className={`border border-zinc-800 px-3 py-2 font-semibold ${conditional ? "text-amber-200" : active ? "text-[#f5b7b8]" : "text-rose-300"}`}
-                  >
+                  <td className={conditional ? "is-warning" : active ? "is-emphasis" : "is-window"}>
                     {prediction ? (
                       <>
                         {prediction.lo_date} ～ {prediction.hi_date}
                         {prediction.constraint_applied ? " †" : ""}
                         {prediction.candidate_window_rebased ? " ‡" : ""}
                         {prediction.overlaps_previous_window && (
-                          <span className="mt-1 block text-[11px] font-normal leading-4 text-amber-200">
+                          <span className="delta-transition-note">
                             ⚠ 与 #{prediction.previous_number} 时间窗重叠
                             {prediction.overlap_start && prediction.overlap_end
                               ? `（${prediction.overlap_start} ～ ${prediction.overlap_end}）`
@@ -1301,24 +1368,25 @@ function DeltaTransitionTable({
                       "—"
                     )}
                   </td>
-                  <td className="border border-zinc-800 px-3 py-2">
+                  <td>
                     {row.sample_count}
                   </td>
-                  <td className="border border-zinc-800 px-3 py-2">
+                  <td>
                     {formatDays(row.mean_days)}
                   </td>
-                  <td className="border border-zinc-800 px-3 py-2">
+                  <td>
                     {formatDays(row.std_days, "±")}
                   </td>
-                  <td className="border border-zinc-800 px-3 py-2">
+                  <td>
                     {formatDays(row.last_interval_days)}
                   </td>
+                  <td title="当前 DELTA 转移接口未提供可校准的发生概率">待模型输出</td>
                 </tr>
               );
             })}
           </tbody>
         </table>
       </div>
-    </div>
+    </section>
   );
 }

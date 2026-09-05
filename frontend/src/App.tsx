@@ -12,6 +12,7 @@ import { Button, InlineLoading, Tag, Theme } from "@carbon/react";
 import {
   BarChart3,
   BellRing,
+  BookOpen,
   ChevronLeft,
   Database,
   Gauge,
@@ -21,7 +22,7 @@ import {
   Layers3,
   Settings2,
 } from "lucide-react";
-import { type ChartBar, type GpmaSeries } from "@/components/TerminalChart";
+import { type ChartBar, type ChartLayer, type ChanlunAnalysis, type GpmaSeries } from "@/components/TerminalChart";
 import { SkillDeltaChart } from "@/components/SkillDeltaChart";
 import { MarketEvidence } from "@/components/MarketEvidence";
 import { DecisionStateCard } from "@/components/DecisionStateCard";
@@ -32,13 +33,17 @@ import { MarketCodeInput } from "@/components/MarketCodeInput";
 import { NewsCenter } from "@/components/NewsCenter";
 import { OptionsRadar } from "@/components/OptionsRadar";
 import { StockPool } from "@/components/StockPool";
+import { StrategyLibrary } from "@/components/StrategyLibrary";
 import { resolveMarketCode, type Market } from "@/lib/marketCode";
 import { SignalInterpretation } from "@/components/SignalInterpretation";
 import {
   MetricCard,
+  MetricValue,
   PageHeader,
   PanelHeading,
+  StatusCard,
   StatusBadge,
+  TerminalPanel,
 } from "@/components/ui/workspace";
 
 const request = async (path: string, options?: RequestInit) => {
@@ -52,7 +57,7 @@ const request = async (path: string, options?: RequestInit) => {
       throw new Error("请求超过 15 秒未返回；请检查网络连接后重试。");
     if (error instanceof TypeError)
       throw new Error(
-        "无法连接本地后端（127.0.0.1:8014）。请运行 02_启动开发版.bat，并保持后端窗口开启。",
+        "无法连接本地后端（127.0.0.1:8015）。请运行 02_启动开发版.bat，并保持后端窗口开启。",
       );
     throw error;
   } finally {
@@ -182,7 +187,9 @@ type MarketAlertSnapshot = {
   }>;
   alerts: MarketAlert[];
   risk_score?: number;
-  regime?: "NORMAL" | "WATCH" | "RISK" | "CRISIS";
+  regime?: "NORMAL" | "WATCH" | "RISK" | "CRISIS" | "DATA_PENDING";
+  raw_regime?: "NORMAL" | "WATCH" | "RISK" | "CRISIS";
+  display_regime?: "NORMAL" | "WATCH" | "RISK" | "CRISIS" | "DATA_PENDING";
   risk_transition?: string;
   modules?: Array<{
     id: string;
@@ -190,10 +197,11 @@ type MarketAlertSnapshot = {
     score: number | null;
     weight: number;
     status: "AVAILABLE" | "UNAVAILABLE";
-    evidence: Array<{ label: string; message: string; percentile?: number | null }>;
+    evidence: Array<{ label: string; message: string; indicator_id?: string; value?: number; percentile?: number | null; change_5d?: number | null; trend?: string; drawdown_pct?: number; realized_volatility_pct?: number; contributions?: Record<string, number>; formula?: string; source?: string; as_of?: string }>;
   }>;
   evidence?: Array<{ module: string; label: string; message: string }>;
-  data_health?: { status: string; available_modules: number; total_modules: number; failures: Array<{ label: string; error: string; fallback?: string; cache_age_seconds?: number }>; sources: string[]; providers?: Record<string, { status: string; configured: boolean; as_of?: string; error?: string }> };
+  methodology?: { version: string; history_sessions: number; change_sessions: number; trend_sessions: number; aggregation: string; regime_rules: string[]; data_gate: string };
+  data_health?: { status: string; available_modules: number; total_modules: number; failures: Array<{ label: string; error: string; fallback?: string; cache_age_seconds?: number }>; sources: string[]; core_checks?: Record<string, boolean>; missing_core?: string[]; indicator_sources?: Array<{ id: string; label: string; source: string; as_of: string; fresh: boolean }>; providers?: Record<string, { status: string; configured: boolean; as_of?: string; error?: string }> };
   risk_history?: Array<{ date: string; risk_score: number; regime: string; available_modules: number }>;
   active_alerts?: MarketAlert[];
   technical_signals?: MarketTechnicalSignal[];
@@ -436,6 +444,37 @@ function OverviewIndicators({
   );
 }
 
+function MarketStatusBar({ data }: { data?: MarketAlertSnapshot }) {
+  const observations = (data?.observations ?? []).slice(0, 4);
+  const regime = data?.display_regime ?? data?.regime ?? "DATA_PENDING";
+  const tone: ActionTone = regime === "NORMAL"
+    ? "positive"
+    : regime === "WATCH" || regime === "DATA_PENDING"
+      ? "warning"
+      : "negative";
+  return (
+    <TerminalPanel className={`market-status-bar market-status-${tone}`} aria-label="市场状态">
+      <div className="market-status-summary">
+        <span>市场状态</span>
+        <b>{data?.risk_score ?? "—"}<small> / 100</small></b>
+        <StatusBadge tone={tone}>{regime}</StatusBadge>
+      </div>
+      <div className="market-status-metrics">
+        {observations.length ? observations.map((item) => (
+          <MetricValue
+            key={item.id}
+            label={item.label}
+            value={item.close.toFixed(2)}
+            detail={`${item.change_pct >= 0 ? "+" : ""}${item.change_pct.toFixed(2)}%`}
+            tone={item.change_pct > 0 ? "warning" : "neutral"}
+          />
+        )) : <span className="market-status-pending">等待市场风险雷达返回波动率指标。</span>}
+      </div>
+      <small className="market-status-asof">{data?.last_check?.checked_at ? `最近检查 ${data.last_check.checked_at}` : "未完成检查"}</small>
+    </TerminalPanel>
+  );
+}
+
 function MarketVolatilityAlerts({
   data,
   onCheck,
@@ -508,12 +547,12 @@ function MarketVolatilityAlerts({
       Number(right.severity === "RISK") - Number(left.severity === "RISK") ||
       right.date.localeCompare(left.date),
     );
-  const regime = data?.regime ?? (priorityAlerts.some((item) => item.severity === "RISK")
+  const regime = data?.display_regime ?? data?.regime ?? (priorityAlerts.some((item) => item.severity === "RISK")
     ? "RISK"
     : priorityAlerts.length
       ? "WATCH"
       : "NORMAL");
-  const regimeLabel = { NORMAL: "正常", WATCH: "重点观察", RISK: "高风险", CRISIS: "危机" }[regime];
+  const regimeLabel = { NORMAL: "正常", WATCH: "重点观察", RISK: "高风险", CRISIS: "危机", DATA_PENDING: "数据待确认" }[regime];
   return (
     <div className="terminal-page">
       <PageHeader
@@ -542,13 +581,33 @@ function MarketVolatilityAlerts({
         <div>
           <span>综合市场风险状态</span>
           <strong>{regimeLabel}</strong>
-          <p>{data?.risk_transition ?? "等待首次检查"} · {data?.evidence?.[0]?.message ?? priorityAlerts[0]?.message ?? "最近一次检查未发现需要优先处理的市场风险事件。"}</p>
+          <p>{data?.risk_transition ?? "等待首次检查"} · {regime === "DATA_PENDING" ? `原始规则状态：${({ NORMAL: "正常", WATCH: "重点观察", RISK: "高风险", CRISIS: "危机" }[data?.raw_regime ?? "NORMAL"])}；关键数据未完整，不作为确认结论。` : data?.evidence?.[0]?.message ?? priorityAlerts[0]?.message ?? "最近一次检查未发现需要优先处理的市场风险事件。"}</p>
         </div>
         <div className="risk-command-metrics">
           <div><span>风险评分</span><b>{data?.risk_score ?? "—"} / 100</b></div>
           <div><span>活跃预警</span><b>{priorityAlerts.length}</b></div>
           <div><span>数据健康</span><b>{data?.data_health?.status ?? data?.last_check?.status ?? "等待刷新"}</b></div>
         </div>
+      </section>
+      <section className="panel panel-evidence mb-4 p-4">
+        <PanelHeading title="本次评估解读" description="综合分是可用模块的等权平均；每个模块只取压力最高的一项证据，并非把同类指标相加。" meta={data?.methodology?.version ?? "等待首次计算"} />
+        <div className="mt-3 grid gap-3 lg:grid-cols-3">
+          <article className="rounded border border-zinc-800 p-3 text-xs text-zinc-400"><span className="block text-zinc-500">最终触发</span><b className="mt-1 block text-sm text-zinc-100">{regime === "DATA_PENDING" ? "关键数据未完整，展示状态已降级" : data?.raw_regime === "CRISIS" ? "至少一个模块 ≥ 90 分，触发危机规则" : data?.raw_regime === "RISK" ? "两个以上模块共振且综合分 ≥ 60" : "按综合分与压力模块规则判定"}</b></article>
+          <article className="rounded border border-zinc-800 p-3 text-xs text-zinc-400"><span className="block text-zinc-500">数据门控</span><b className="mt-1 block text-sm text-zinc-100">{data?.data_health?.status === "FULL" ? "关键模块数据完整" : data?.data_health?.missing_core?.length ? `缺少：${data.data_health.missing_core.join("、")}` : "存在辅助数据或提供方问题"}</b></article>
+          <article className="rounded border border-zinc-800 p-3 text-xs text-zinc-400"><span className="block text-zinc-500">使用窗口</span><b className="mt-1 block text-sm text-zinc-100">历史 {data?.methodology?.history_sessions ?? 252} 日 · 变化 {data?.methodology?.change_sessions ?? 5} 日 · 趋势 {data?.methodology?.trend_sessions ?? 20} 日</b></article>
+        </div>
+        <div className="mt-4 overflow-x-auto">
+          <table>
+            <thead><tr><th>模块 / 最强证据</th><th>当前值</th><th>历史分位</th><th>五日变化</th><th>趋势 / 其他</th><th>分项贡献</th><th>模块分数</th><th>来源 / 日期</th></tr></thead>
+            <tbody>{(data?.modules ?? []).map((module) => { const evidence = module.evidence[0]; return <tr key={`explain-${module.id}`}><td><b>{module.label}</b><span className="block text-xs text-zinc-500">{evidence?.label ?? "无可用证据"}</span></td><td>{evidence?.value ?? "—"}</td><td>{evidence?.percentile == null ? "—" : `${evidence.percentile}%`}</td><td>{evidence?.change_5d == null ? "—" : `${evidence.change_5d >= 0 ? "+" : ""}${evidence.change_5d}%`}</td><td>{evidence?.trend ?? (evidence?.drawdown_pct == null ? "—" : `回撤 ${evidence.drawdown_pct}% · 波动 ${evidence.realized_volatility_pct}%`)}</td><td>{evidence?.contributions ? Object.entries(evidence.contributions).map(([key, value]) => `${key} ${value}`).join(" · ") : "—"}</td><td>{module.score == null ? "—" : `${module.score}/100`}</td><td>{evidence?.source ?? "—"}<span className="block text-xs text-zinc-500">{evidence?.as_of ?? "—"}</span></td></tr>; })}</tbody>
+          </table>
+        </div>
+        <details className="mt-4 rounded border border-zinc-800 p-3" open>
+          <summary className="cursor-pointer text-sm font-semibold text-zinc-100">完整评分方法与边界</summary>
+          <p className="mt-3 text-xs text-zinc-400">{data?.methodology?.aggregation ?? "每模块取最高压力证据，再计算综合分。"}</p>
+          <ul className="mt-2 list-disc space-y-1 pl-5 text-xs text-zinc-400">{(data?.methodology?.regime_rules ?? []).map((rule) => <li key={rule}>{rule}</li>)}<li>{data?.methodology?.data_gate ?? "关键数据缺失时不输出确认性风险结论。"}</li></ul>
+          <p className="mt-3 text-xs text-zinc-500">波动率取绝对阈值、历史分位和五日冲击的最大值；权益由回撤、20 日实现波动率和 50 日趋势组成；利率、信用与全球模块由方向调整后的历史分位、五日变化和趋势加分组成。该规则仅作研究风险监测，不构成投资建议。</p>
+        </details>
       </section>
       <section className="panel panel-evidence mb-4 p-4">
         <PanelHeading title="跨资产压力分解" description="模块内取最强证据，跨模块共振后才升级风险状态" meta={`${data?.data_health?.available_modules ?? 0}/${data?.data_health?.total_modules ?? 5} 个模块可用`} />
@@ -562,7 +621,8 @@ function MarketVolatilityAlerts({
           ))}
         </div>
         {data?.risk_history?.length ? <p className="mt-3 text-xs text-zinc-500">最近风险轨迹：{data.risk_history.map((item) => `${item.date.slice(5)} ${item.risk_score}`).join(" · ")}</p> : null}
-        <div className="mt-3 flex items-center gap-3 text-xs text-zinc-500"><span>数据源：{Object.entries(data?.data_health?.providers ?? {}).map(([name, provider]) => `${name} ${provider.status}`).join(" · ") || "等待检查"}</span><button className="secondary-button" onClick={() => void checkProviders()} disabled={checkingProviders}>{checkingProviders ? "检查中…" : "检查数据源"}</button></div>
+        <div className="mt-3 flex flex-wrap items-center gap-3 text-xs text-zinc-500"><span>提供方连通性：{Object.entries(data?.data_health?.providers ?? {}).map(([name, provider]) => `${name} ${provider.status}`).join(" · ") || "等待检查"}</span><button className="secondary-button" onClick={() => void checkProviders()} disabled={checkingProviders}>{checkingProviders ? "检查中…" : "检查数据源"}</button></div>
+        {data?.data_health?.indicator_sources?.length ? <div className="mt-3 text-xs text-zinc-400"><b className="font-medium text-zinc-300">本次实际采用：</b>{data.data_health.indicator_sources.map((item) => `${item.label} ${item.source}${item.fresh ? "" : "（陈旧）"} · ${item.as_of}`).join("；")}</div> : null}
         {providerMessage ? <p className="mt-2 text-xs text-zinc-400">{providerMessage}</p> : null}
         {data?.data_health?.failures?.length ? <p className="mt-2 text-xs text-amber-300">部分数据不可用：{data.data_health.failures.map((item) => `${item.label}${item.fallback ? "（使用陈旧缓存）" : ""}`).join("、")}</p> : null}
       </section>
@@ -856,16 +916,19 @@ function Overview({
   riskData,
   initialCode = "US.VXN",
   contextKey = 0,
+  initialLayer = "gpmapro",
 }: {
   onOpenNews: (symbol: string) => void;
   riskData?: MarketAlertSnapshot;
   initialCode?: string;
   contextKey?: number;
+  initialLayer?: ChartLayer;
 }) {
   const [symbol, setSymbol] = useState(initialCode);
   const [draft, setDraft] = useState(initialCode);
   const [market, setMarket] = useState<Market>(() => marketForCode(initialCode));
   const [timeframe, setTimeframe] = useState("1d");
+  const [activeLayer, setActiveLayer] = useState<ChartLayer>(initialLayer);
   const [selectedSnapshotId, setSelectedSnapshotId] = useState<
     string | undefined
   >();
@@ -942,7 +1005,9 @@ function Overview({
     setSelectedSnapshotId(undefined);
     setFocusDate(undefined);
     setLastFetch(null);
-  }, [contextKey]);
+    setActiveLayer(initialLayer);
+    if (initialLayer === "chanlun") setTimeframe("1d");
+  }, [contextKey, initialLayer]);
   useEffect(() => {
     if (contextKey === 0 || snapshots.isLoading || autoFetchKey.current === contextKey) return;
     autoFetchKey.current = contextKey;
@@ -995,6 +1060,12 @@ function Overview({
     enabled: Boolean(snapshotId && timeframe === "1d"),
     retry: false,
   });
+  const chanlun = useQuery<ChanlunAnalysis>({
+    queryKey: ["chanlun", symbol, snapshotId],
+    queryFn: () => request(`/api/chanlun/${symbol}?timeframe=1d${snapshotQuery}`),
+    enabled: Boolean(snapshotId && timeframe === "1d" && activeLayer === "chanlun"),
+    retry: false,
+  });
   const volume = useQuery<VolumeSnapshot>({
     queryKey: ["volume", symbol, timeframe, snapshotId],
     queryFn: () =>
@@ -1030,6 +1101,16 @@ function Overview({
     .sort((left, right) => Number(right.severity === "RISK") - Number(left.severity === "RISK") || right.date.localeCompare(left.date));
   const actionBlocked = [...(action?.blocked_by ?? []), ...(action?.missing_conditions ?? [])].filter(Boolean);
   const newsItems = companyNews.data?.company_items ?? [];
+  const deltaState = itd.data?.reversal?.state ?? itd.data?.status ?? "等待计算";
+  const deltaTone: ActionTone = deltaState.includes("CONFIRMED")
+    ? "warning"
+    : deltaState === "NORMAL" || deltaState === "READY"
+      ? "positive"
+      : "info";
+  const interpretationError = interpretation.error instanceof Error
+    ? interpretation.error.message
+    : "行动评估接口未返回结果。";
+  const interpretationPending = interpretation.isLoading || interpretation.isFetching;
   return (
     <div className="terminal-page overview-page">
       <header className="overview-toolbar">
@@ -1087,6 +1168,39 @@ function Overview({
         <section className="empty-state panel panel-evidence"><strong>尚未找到 {symbol} 的可用行情快照</strong><span>使用右上角“拉取”创建不可变市场快照后，系统才会显示 K 线、行动建议与研究证据。</span></section>
       ) : (
         <div className="command-center">
+          <MarketStatusBar data={riskData} />
+          <section className="command-quant-status" aria-label="量化模型状态">
+            <StatusCard
+              label="DELTA 状态"
+              value={deltaState}
+              detail={itd.data?.history_confidence === "LIMITED" ? "历史样本有限" : `倒转 ${itd.data?.reversal?.windows?.length ?? 0} 个窗口`}
+              tone={deltaTone}
+            />
+            <StatusCard
+              label="GPMAPRO"
+              value={state ? `${state.trend.direction} / ${state.trend.strength}` : "等待计算"}
+              detail={state ? `信号 ${Object.values(state.signals).filter(Boolean).length} 项触发` : "技术趋势与信号"}
+              tone={state ? directionTone(state.trend.direction) : "neutral"}
+            />
+            <StatusCard
+              label="综合 Evidence"
+              value={interpretationPending ? "评估中…" : interpretation.isError ? "评估失败" : action?.validation.status ?? "等待评估"}
+              detail={interpretationPending ? "正在汇总同一快照的可追溯证据" : interpretation.isError ? interpretationError : action ? `${action.evidence.length} 条可追溯证据` : "证据层尚未返回"}
+              tone={interpretationPending ? "info" : interpretation.isError ? "negative" : action?.validation.status === "VALID" ? "positive" : "info"}
+            />
+            <StatusCard
+              label="决策 Decision"
+              value={interpretationPending ? "计算中…" : interpretation.isError ? "计算失败" : action?.action_label ?? "等待计算"}
+              detail={interpretationPending ? "正在执行 DELTA × GPMAPRO 规则" : interpretation.isError ? "请检查后端连接后重新拉取" : action ? `建议强度 ${action.action_strength} / 100` : "不自动下单"}
+              tone={interpretationPending ? "info" : interpretation.isError ? "negative" : actionTone(action?.action)}
+            />
+            <StatusCard
+              label="数据新鲜度"
+              value={volume.data?.data.freshness ?? "等待数据"}
+              detail={volume.data?.data.latest_bar_date ? `截至 ${volume.data.data.latest_bar_date}` : "行情快照状态"}
+              tone={volume.data?.data.freshness === "FRESH" ? "positive" : volume.data ? "warning" : "neutral"}
+            />
+          </section>
           <div className="command-layout">
             <main className="command-main">
               <section className="command-chart panel panel-evidence">
@@ -1108,6 +1222,9 @@ function Overview({
                   mode="overview"
                   analysisLoading={itd.isLoading}
                   analysisError={itd.isError ? (itd.error instanceof Error ? itd.error.message : "接口未返回结果") : undefined}
+                  layer={activeLayer}
+                  onLayerChange={(layer) => { setActiveLayer(layer); if (layer === "chanlun") setTimeframe("1d"); }}
+                  chanlun={chanlun.data}
                 />
               </section>
 
@@ -1130,9 +1247,9 @@ function Overview({
               </div>
             </main>
             <aside className="command-sidebar">
-              <section className={`command-side-panel command-risk-panel panel panel-risk ${activeAlerts.some((item) => item.severity === "RISK") ? "is-risk" : ""}`}><div className="command-panel-heading"><span>市场风险</span><StatusBadge tone={activeAlerts.some((item) => item.severity === "RISK") ? "negative" : activeAlerts.length ? "warning" : "positive"}>{activeAlerts.some((item) => item.severity === "RISK") ? "RISK" : activeAlerts.length ? "WATCH" : "NORMAL"}</StatusBadge></div><div className="command-risk-summary"><b>{activeAlerts.length ? `${activeAlerts.length} 项活跃预警` : "暂无活跃预警"}</b><small>{riskData?.last_check?.checked_at ? `最近检查 ${riskData.last_check.checked_at}` : "等待风险雷达刷新"}</small></div>{activeAlerts.length ? <div className="command-alert-list">{activeAlerts.slice(0, 5).map((alert) => <article key={alert.id} className={alert.severity === "RISK" ? "is-risk" : "is-watch"}><div><StatusBadge tone={alert.severity === "RISK" ? "negative" : "warning"}>{alert.display_label ?? alert.label}</StatusBadge><time>{alert.date}</time></div><p>{alert.message}</p></article>)}{activeAlerts.length > 5 && <small>另有 {activeAlerts.length - 5} 项活跃预警，请在市场风险雷达查看。</small>}</div> : <p>最近一次检查未发现需要优先处理的预警。</p>}</section>
-              <section className={`command-side-panel panel panel-decision tone-${actionTone(action?.action)}`}><div className="command-panel-heading"><span>行动强度</span><StatusBadge tone={actionTone(action?.action)}>{action?.action ?? "等待计算"}</StatusBadge></div><b>{action?.action_strength ?? "—"}<small> / 100</small></b><div className="command-strength-bar"><i style={{ width: `${action?.action_strength ?? 0}%` }} /></div><div className="command-driver-list">{(action?.drivers ?? []).map((driver) => <div key={driver.id}><span>{driver.title}</span><StatusBadge tone={directionTone(driver.status)}>{driver.status}</StatusBadge></div>)}</div></section>
-              <section className="command-side-panel panel panel-research"><div className="command-panel-heading"><span>模型与数据</span><StatusBadge tone={volume.data?.data.freshness === "FRESH" ? "positive" : "warning"}>{volume.data?.data.freshness ?? "未知"}</StatusBadge></div><div className="command-model-list"><div><span>GPMAPRO 趋势</span><b>{state?.trend.direction ?? "—"}</b></div><div><span>DELTA 倒转</span><b>{itd.data?.reversal?.state ?? "—"}</b></div><div><span>新闻覆盖层</span><b>{action?.news_overlay.status ?? "等待计算"}</b></div><div><span>验证状态</span><b>{action?.validation.status ?? "—"}</b></div></div></section>
+              <section className={`command-side-panel signal-card signal-card-risk command-risk-panel panel panel-risk ${activeAlerts.some((item) => item.severity === "RISK") ? "is-risk" : ""}`}><div className="command-panel-heading"><span>风险提示 Risk Alerts</span><StatusBadge tone={activeAlerts.some((item) => item.severity === "RISK") ? "negative" : activeAlerts.length ? "warning" : "positive"}>{activeAlerts.some((item) => item.severity === "RISK") ? "RISK" : activeAlerts.length ? "WATCH" : "NORMAL"}</StatusBadge></div><div className="command-risk-summary"><b>{activeAlerts.length ? `${activeAlerts.length} 项活跃预警` : "暂无活跃预警"}</b><small>{riskData?.last_check?.checked_at ? `最近检查 ${riskData.last_check.checked_at}` : "等待风险雷达刷新"}</small></div>{activeAlerts.length ? <div className="command-alert-list">{activeAlerts.slice(0, 5).map((alert) => <article key={alert.id} className={alert.severity === "RISK" ? "is-risk" : "is-watch"}><div><StatusBadge tone={alert.severity === "RISK" ? "negative" : "warning"}>{alert.display_label ?? alert.label}</StatusBadge><time>{alert.date}</time></div><p>{alert.message}</p></article>)}{activeAlerts.length > 5 && <small>另有 {activeAlerts.length - 5} 项活跃预警，请在市场风险雷达查看。</small>}</div> : <p>最近一次检查未发现需要优先处理的预警。</p>}</section>
+              <section className={`command-side-panel signal-card signal-card-decision panel panel-decision tone-${actionTone(action?.action)}`}><div className="command-panel-heading"><span>行动强度 Action Strength</span><StatusBadge tone={actionTone(action?.action)}>{action?.action ?? "等待计算"}</StatusBadge></div><b>{action?.action_strength ?? "—"}<small> / 100</small></b><div className="command-strength-bar"><i style={{ width: `${action?.action_strength ?? 0}%` }} /></div><div className="command-driver-list">{(action?.drivers ?? []).map((driver) => <div key={driver.id}><span>{driver.title}</span><StatusBadge tone={directionTone(driver.status)}>{driver.status}</StatusBadge></div>)}</div></section>
+              <section className="command-side-panel signal-card signal-card-model panel panel-research"><div className="command-panel-heading"><span>模型与数据 Model Status</span><StatusBadge tone={volume.data?.data.freshness === "FRESH" ? "positive" : "warning"}>{volume.data?.data.freshness ?? "未知"}</StatusBadge></div><div className="command-model-list"><div><span>GPMAPRO 趋势</span><b>{state?.trend.direction ?? "—"}</b></div><div><span>DELTA 倒转</span><b>{itd.data?.reversal?.state ?? "—"}</b></div><div><span>新闻覆盖层</span><b>{action?.news_overlay.status ?? "等待计算"}</b></div><div><span>验证状态</span><b>{action?.validation.status ?? "—"}</b></div></div></section>
             </aside>
           </div>
           <details className="command-full-decision" onToggle={(event) => setShowFullDecision(event.currentTarget.open)}><summary>查看完整行动解释与审计</summary>{showFullDecision && <SignalInterpretation symbol={symbol} timeframe={timeframe} snapshotId={snapshotId} onFocusDate={setFocusDate} onOpenNews={onOpenNews} />}</details>
@@ -1147,7 +1264,7 @@ function Backtest() {
     <div className="terminal-page">
       <PageHeader
         title="回测实验室"
-        description="从已导入的 CSV 或不可变 Futu 快照建立可核验数据集；信号与回测将在确认数据后运行。"
+        description="输入股票后自动获取 Yahoo 日线行情，查看 GPMA V1/V2 信号并运行可复现回测。"
       />
       <BacktestDataWorkspace />
     </div>
@@ -1347,7 +1464,7 @@ function FutuSnapshotData() {
 export default function App() {
   const [page, setPage] = useState("overview");
   const [newsContext, setNewsContext] = useState({ code: "US.AAPL", openDetails: false, key: 0 });
-  const [overviewContext, setOverviewContext] = useState({ code: "US.VXN", key: 0 });
+  const [overviewContext, setOverviewContext] = useState<{ code: string; layer: ChartLayer; key: number }>({ code: "US.VXN", layer: "gpmapro", key: 0 });
   const [navigationOpen, setNavigationOpen] = useState(
     () => typeof window !== "undefined" && window.innerWidth >= 768,
   );
@@ -1406,13 +1523,18 @@ export default function App() {
     setPage("news");
   }, []);
   const openOverview = useCallback((code: string) => {
-    setOverviewContext(previous => ({ code: code.toUpperCase(), key: previous.key + 1 }));
+    setOverviewContext(previous => ({ code: code.toUpperCase(), layer: "gpmapro", key: previous.key + 1 }));
+    setPage("overview");
+  }, []);
+  const openStrategyWorkspace = useCallback((code: string, layer: ChartLayer) => {
+    setOverviewContext(previous => ({ code: code.toUpperCase(), layer, key: previous.key + 1 }));
     setPage("overview");
   }, []);
   const nav = useMemo(
     () => [
       { id: "overview", label: "总览", Icon: Gauge },
       { id: "alerts", label: "市场风险雷达", Icon: BellRing },
+      { id: "strategy-library", label: "交易策略集", Icon: BookOpen },
       { id: "backtest", label: "回测实验室", Icon: BarChart3 },
       { id: "data", label: "数据管理", Icon: Database },
       { id: "news", label: "新闻中心", Icon: Newspaper },
@@ -1423,7 +1545,7 @@ export default function App() {
     [],
   );
   const pages: Record<string, ReactNode> = {
-    overview: <Overview onOpenNews={openNews} riskData={marketAlerts.data} initialCode={overviewContext.code} contextKey={overviewContext.key} />,
+    overview: <Overview onOpenNews={openNews} riskData={marketAlerts.data} initialCode={overviewContext.code} initialLayer={overviewContext.layer} contextKey={overviewContext.key} />,
     alerts: (
       <MarketVolatilityAlerts
         data={marketAlerts.data}
@@ -1432,6 +1554,7 @@ export default function App() {
         refresh={() => refetchMarketAlerts()}
       />
     ),
+    "strategy-library": <StrategyLibrary onOpenWorkspace={openStrategyWorkspace} />,
     backtest: <Backtest />,
     data: (
       <>

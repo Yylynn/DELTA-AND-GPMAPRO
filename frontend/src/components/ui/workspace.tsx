@@ -70,6 +70,61 @@ export function MetricCard({
   );
 }
 
+/** A compact terminal surface used for data-first regions of the overview. */
+export function TerminalPanel({
+  children,
+  className,
+  ...props
+}: HTMLAttributes<HTMLElement>) {
+  return (
+    <section className={cn("terminal-panel", className)} {...props}>
+      {children}
+    </section>
+  );
+}
+
+/** Keeps labels visually subordinate to financial values everywhere it is used. */
+export function MetricValue({
+  label,
+  value,
+  detail,
+  tone = "neutral",
+}: {
+  label: string;
+  value: ReactNode;
+  detail?: ReactNode;
+  tone?: MetricTone;
+}) {
+  return (
+    <div className={cn("metric-value", `metric-value-${tone}`)}>
+      <span>{label}</span>
+      <b>{value}</b>
+      {detail && <small>{detail}</small>}
+    </div>
+  );
+}
+
+/** Semantic status card for a single model or feed in the research terminal. */
+export function StatusCard({
+  label,
+  value,
+  detail,
+  tone = "neutral",
+}: {
+  label: string;
+  value: ReactNode;
+  detail: ReactNode;
+  tone?: MetricTone;
+}) {
+  return (
+    <article className={cn("status-card", `status-card-${tone}`)}>
+      <span>{label}</span>
+      <b>{value}</b>
+      <small>{detail}</small>
+    </article>
+  );
+}
+
 export function StatusBadge({
   children,
   tone = "neutral",

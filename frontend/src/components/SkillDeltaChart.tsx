@@ -6,6 +6,8 @@ import { useQueryClient } from "@tanstack/react-query";
 import {
   TerminalChart,
   type ChartBar,
+  type ChartLayer,
+  type ChanlunAnalysis,
   type DeltaAnalysis,
   type GpmaSeries,
 } from "./TerminalChart";
@@ -124,6 +126,9 @@ export function SkillDeltaChart({
   mode,
   analysisLoading = false,
   analysisError,
+  layer,
+  chanlun,
+  onLayerChange,
 }: {
   bars: ChartBar[];
   analysis?: DeltaAnalysis;
@@ -138,6 +143,9 @@ export function SkillDeltaChart({
   mode?: "overview" | "research";
   analysisLoading?: boolean;
   analysisError?: string;
+  layer?: ChartLayer;
+  chanlun?: ChanlunAnalysis;
+  onLayerChange?: (layer: ChartLayer) => void;
 }) {
   const client = useQueryClient();
   // Older compact call sites do not pass their series yet.  In that case,
@@ -207,6 +215,9 @@ export function SkillDeltaChart({
         mode={mode}
         deltaAnalysisLoading={analysisLoading}
         deltaAnalysisError={analysisError}
+        layer={layer}
+        chanlun={chanlun}
+        onLayerChange={onLayerChange}
       />
     </>
   );
