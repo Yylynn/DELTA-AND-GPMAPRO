@@ -46,18 +46,20 @@ import {
   TerminalPanel,
 } from "@/components/ui/workspace";
 
+const REQUEST_TIMEOUT_MS = 45_000;
+
 const request = async (path: string, options?: RequestInit) => {
   let response: Response;
   const controller = new AbortController();
-  const timeout = window.setTimeout(() => controller.abort(), 15_000);
+  const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   try {
     response = await fetch(path, { ...options, signal: controller.signal });
   } catch (error) {
     if (error instanceof DOMException && error.name === "AbortError")
-      throw new Error("请求超过 15 秒未返回；请检查网络连接后重试。");
+      throw new Error("请求超过 45 秒未返回；若使用 Render 免费实例，请等待服务唤醒后重试。");
     if (error instanceof TypeError)
       throw new Error(
-        "无法连接本地后端（127.0.0.1:8015）。请运行 02_启动开发版.bat，并保持后端窗口开启。",
+        "无法连接后端服务。线上请稍后重试；本地开发请运行 02_启动开发版.bat 并保持后端窗口开启。",
       );
     throw error;
   } finally {
