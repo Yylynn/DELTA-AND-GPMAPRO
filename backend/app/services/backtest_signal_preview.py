@@ -39,6 +39,31 @@ def _indicator_definitions(
     )
 
 
+def calculate_kdj_signals(bars: pd.DataFrame) -> pd.DataFrame:
+    """Translate the Wenhua KDJ formula used by the backtest laboratory.
+
+    Wenhua ``SMA(X, 3, 1)`` is the recursive Chinese SMA with alpha 1/3,
+    rather than a three-row arithmetic moving average. Signals are confirmed
+    on the session close and therefore remain eligible only on the next bar.
+    """
+    result = bars.copy().reset_index(drop=True)
+    lowest = result.low.rolling(9, min_periods=9).min()
+    highest = result.high.rolling(9, min_periods=9).max()
+    spread = (highest - lowest).where((highest - lowest) != 0)
+    rsv = (result.close - lowest) / spread * 100
+    k = rsv.ewm(alpha=1 / 3, adjust=False, min_periods=1).mean()
+    d = k.ewm(alpha=1 / 3, adjust=False, min_periods=1).mean()
+    j = 3 * k - 2 * d
+
+    result["kdj_rsv"] = rsv
+    result["kdj_k"] = k
+    result["kdj_d"] = d
+    result["kdj_j"] = j
+    result["kdj_j_up_0"] = ((j > 0) & (j.shift(1) <= 0)).fillna(False)
+    result["kdj_j_down_100"] = ((j < 100) & (j.shift(1) >= 100)).fillna(False)
+    return result
+
+
 SIGNAL_DEFINITIONS = (
     *_indicator_definitions("1.0", V1_SIGNAL_COLUMNS),
     SignalDefinition("V1_BOTTOM_FACE", "bottom_face_y", "1.0", "DIVERGENCE", "BUY"),
@@ -48,6 +73,8 @@ SIGNAL_DEFINITIONS = (
     SignalDefinition("V1_BOTTOM_ARROW_3", "bottom_arrow_3_y", "1.0", "DIVERGENCE", "BUY"),
     SignalDefinition("V1_TOP_ARROW_3", "top_arrow_3_y", "1.0", "DIVERGENCE", "SELL"),
     *_indicator_definitions("2.0", V2_SIGNAL_COLUMNS, {"b3": "b031", "s2": "s021"}),
+    SignalDefinition("KDJ_J_UP_0", "kdj_j_up_0", "KDJ", "KDJ", "BUY"),
+    SignalDefinition("KDJ_J_DOWN_100", "kdj_j_down_100", "KDJ", "KDJ", "SELL"),
 )
 
 
@@ -92,12 +119,16 @@ class BacktestSignalPreviewService:
         calculated_by_version = {
             "1.0": self.gpma_v1.calculate(bars).copy().reset_index(drop=True),
             "2.0": self.gpma_v2.calculate(bars).copy().reset_index(drop=True),
+            "KDJ": calculate_kdj_signals(bars),
         }
         for calculated_version in calculated_by_version.values():
             calculated_version["date"] = pd.to_datetime(calculated_version.date)
         calculated = calculated_by_version["2.0"]
-        if not calculated_by_version["1.0"].date.equals(calculated.date):
-            raise ValueError("GPMAPRO 1.0 and 2.0 produced different trading calendars")
+        if any(
+            not version_data.date.equals(calculated.date)
+            for version_data in calculated_by_version.values()
+        ):
+            raise ValueError("signal calculators produced different trading calendars")
         dates = calculated.date.dt.date.tolist()
         events: list[dict] = []
         full_counts: dict[str, int] = {}
@@ -179,6 +210,7 @@ class BacktestSignalPreviewService:
                 "indicator_signal": "signal is known after its session close",
                 "indicator_tradable_on": "next available session",
                 "divergence_signal": "each formula version uses its final filtered DRAWICON point after session close",
+                "kdj_signal": "J crossing above 0 or below 100 is confirmed after session close and tradable next session",
                 "calculation": "GPMAPRO 1.0 and 2.0 are calculated on the same full history before display slicing",
             },
         }

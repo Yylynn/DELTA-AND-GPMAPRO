@@ -12,8 +12,8 @@ import { PanelHeading } from "@/components/ui/workspace";
 
 type SignalCatalogItem = {
   code: string;
-  version: "1.0" | "2.0";
-  family: "B" | "S" | "DIVERGENCE";
+  version: "1.0" | "2.0" | "KDJ";
+  family: "B" | "S" | "DIVERGENCE" | "KDJ";
   direction: "BUY" | "SELL";
   full_count: number;
 };
@@ -71,6 +71,12 @@ function SignalRulePicker({
       title: "背离",
       kind: direction === "BUY" ? "底部" : "顶部",
       signals: signals.filter((signal) => signal.family === "DIVERGENCE"),
+    },
+    {
+      key: "kdj",
+      title: "KDJ",
+      kind: "J 极值",
+      signals: signals.filter((signal) => signal.family === "KDJ"),
     },
   ];
   return (

@@ -25,8 +25,8 @@ export type PreviewBar = {
 
 export type SignalEvent = {
   code: string;
-  version: "1.0" | "2.0";
-  family: "B" | "S" | "DIVERGENCE";
+  version: "1.0" | "2.0" | "KDJ";
+  family: "B" | "S" | "DIVERGENCE" | "KDJ";
   direction: "BUY" | "SELL";
   signal_date: string;
   marker_date: string;
@@ -122,7 +122,7 @@ type SignalOverlay = {
 };
 
 const signalEventOrder = (event: SignalEvent) => {
-  const familyOrder = event.family === "DIVERGENCE" ? 10 : 0;
+  const familyOrder = event.family === "DIVERGENCE" ? 20 : event.family === "KDJ" ? 10 : 0;
   const versionOrder = event.version === "1.0" ? 0 : 1;
   return familyOrder + versionOrder;
 };

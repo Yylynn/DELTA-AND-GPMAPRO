@@ -30,8 +30,8 @@ type LoadedSelection = {
 
 type SignalCatalogItem = {
   code: string;
-  version: "1.0" | "2.0";
-  family: "B" | "S" | "DIVERGENCE";
+  version: "1.0" | "2.0" | "KDJ";
+  family: "B" | "S" | "DIVERGENCE" | "KDJ";
   direction: "BUY" | "SELL";
   full_count: number;
   display_count: number;
@@ -83,6 +83,12 @@ function SignalLegendColumn({
       title: "背离",
       kind: direction === "BUY" ? "底部" : "顶部",
       signals: signals.filter((signal) => signal.direction === direction && signal.family === "DIVERGENCE"),
+    },
+    {
+      key: "kdj",
+      title: "KDJ",
+      kind: "J 极值",
+      signals: signals.filter((signal) => signal.direction === direction && signal.family === "KDJ"),
     },
   ];
   return (
@@ -289,7 +295,7 @@ export function BacktestSignalExplorer({
             </div>
           </div>
           <p className="panel-footnote">
-            第一版与第二版 B/S 使用完整历史独立计算；一级至三级背离采用统一信号。所有标记位于信号确认的收盘日，下一交易日才可交易。图例显示或隐藏信号不会触发重新计算。
+            第一版与第二版 B/S、统一背离及 KDJ-J 极值信号均使用完整历史计算。所有标记位于信号确认的收盘日，下一交易日才可交易。图例显示或隐藏信号不会触发重新计算。
           </p>
           <Suspense fallback={<p className="mt-6 border-t border-zinc-800 pt-6 text-sm text-zinc-500">正在加载回测规则界面…</p>}>
             <BacktestRuleLab

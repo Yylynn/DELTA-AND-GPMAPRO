@@ -5,6 +5,7 @@ from app.main import app
 from app.services.backtest_signal_preview import (
     BacktestSignalPreviewService,
     SIGNAL_DEFINITIONS,
+    calculate_kdj_signals,
 )
 
 
@@ -106,7 +107,29 @@ def test_signal_preview_calculates_full_history_before_slicing_display_range():
     assert "V2_BOTTOM_ARROW_2" not in catalog
     assert "V2_S2" not in catalog
     assert set(catalog) == {definition.code for definition in SIGNAL_DEFINITIONS}
-    assert {item["version"] for item in catalog.values()} == {"1.0", "2.0"}
+    assert {item["version"] for item in catalog.values()} == {"1.0", "2.0", "KDJ"}
+    assert {"KDJ_J_UP_0", "KDJ_J_DOWN_100"} <= set(catalog)
+
+
+def test_kdj_signals_translate_wenhua_cross_semantics():
+    frame = bars(80)
+    wave = [100 - index * 2 for index in range(20)]
+    wave += [60 + index * 3 for index in range(20)]
+    wave += [120 - index * 3 for index in range(20)]
+    wave += [60 + index * 2 for index in range(20)]
+    frame["close"] = wave
+    frame["open"] = frame.close
+    frame["high"] = frame.close + 1
+    frame["low"] = frame.close - 1
+
+    calculated = calculate_kdj_signals(frame)
+    expected_buy = (calculated.kdj_j > 0) & (calculated.kdj_j.shift(1) <= 0)
+    expected_sell = (calculated.kdj_j < 100) & (calculated.kdj_j.shift(1) >= 100)
+
+    assert calculated.kdj_j_up_0.equals(expected_buy.fillna(False))
+    assert calculated.kdj_j_down_100.equals(expected_sell.fillna(False))
+    assert calculated.kdj_j_up_0.any()
+    assert calculated.kdj_j_down_100.any()
 
 
 def test_divergence_preview_uses_final_drawicon_columns_and_next_session():

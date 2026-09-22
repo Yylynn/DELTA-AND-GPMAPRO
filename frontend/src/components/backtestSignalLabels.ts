@@ -5,6 +5,8 @@ export const BACKTEST_SIGNAL_LABELS: Record<string, string> = {
   TOP_ARROW_2: "顶部二级背离 ↓",
   BOTTOM_ARROW_3: "底部三级背离 ⬆",
   TOP_ARROW_3: "顶部三级背离 ⬇",
+  KDJ_J_UP_0: "J↑",
+  KDJ_J_DOWN_100: "J↓",
 };
 
 const BACKTEST_DIVERGENCE_ICONS: Record<string, string> = {

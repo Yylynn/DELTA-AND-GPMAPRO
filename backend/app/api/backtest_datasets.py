@@ -25,6 +25,8 @@ _BACKTEST_SIGNAL_LABELS = {
     "TOP_ARROW_2": "顶部二级背离",
     "BOTTOM_ARROW_3": "底部三级背离",
     "TOP_ARROW_3": "顶部三级背离",
+    "KDJ_J_UP_0": "KDJ J↑",
+    "KDJ_J_DOWN_100": "KDJ J↓",
 }
 
 
