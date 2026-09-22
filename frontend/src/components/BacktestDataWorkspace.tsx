@@ -142,8 +142,8 @@ export function BacktestDataWorkspace() {
   const dataset = loaded?.datasets[0];
 
   return (
-    <div className="backtest-workspace-stack grid">
-      <section className="panel backtest-workspace-panel">
+    <div className="backtest-workspace-stack">
+      <section className="panel backtest-workspace-panel backtest-intake-panel">
         <PanelHeading
           title="① 输入股票"
           description="输入股票代码后，系统会从 Yahoo 自动获取日线复权行情并加载到回测实验室。"
@@ -224,21 +224,10 @@ export function BacktestDataWorkspace() {
         )}
       </section>
 
-      {loaded ? (
-        <BacktestSignalExplorer
-          loaded={loaded}
-          onBacktestComplete={(result) => {
-            setLastResult(result);
-            setShowResult(true);
-          }}
-        />
-      ) : (
-        <section className="panel backtest-workspace-panel border-dashed opacity-70">
-          <PanelHeading
-            title="② K 线与信号预览"
-            description="输入股票并加载行情后，系统会自动计算 GPMA V1/V2 信号。"
-            meta="等待股票"
-          />
+      {loaded ? <BacktestSignalExplorer loaded={loaded} onBacktestComplete={(result) => { setLastResult(result); setShowResult(true); }} /> : (
+        <section className="backtest-empty-stage" aria-live="polite">
+          <div className="backtest-empty-chart"><div className="backtest-empty-grid" aria-hidden="true" /><div><span>② SIGNAL PREVIEW</span><strong>K 线与信号预览</strong><p>加载行情后，这里会展示 GPMA V1/V2 信号、策略参数和可复现的回测入口。</p></div></div>
+          <aside><span>研究流程</span><b>等待股票加载</b><p>先输入股票代码，再取得经校验的日线行情。</p></aside>
         </section>
       )}
     </div>

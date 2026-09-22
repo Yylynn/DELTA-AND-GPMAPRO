@@ -13,6 +13,11 @@ import {
   backtestSignalLabel,
   backtestSignalShortLabel,
 } from "@/components/backtestSignalLabels";
+import {
+  DivergenceIcon,
+  divergenceGlyphKind,
+  type DivergenceGlyphKind,
+} from "@/components/BacktestSignalGlyph";
 
 export type PreviewBar = {
   date: string;
@@ -36,75 +41,6 @@ export type SignalEvent = {
   price: number;
   structure_price: number | null;
 };
-
-const V1_DIVERGENCE_COLOR = "#33b1ff";
-const V2_DIVERGENCE_COLOR = "#be95ff";
-
-type DivergenceGlyphKind = "happy" | "sad" | "thin-up" | "thin-down" | "wide-up" | "wide-down" | "triangle-up" | "triangle-down";
-
-const divergenceGlyphKind = (event: SignalEvent): DivergenceGlyphKind => {
-  if (event.code.endsWith("_BOTTOM_FACE")) return "happy";
-  if (event.code.endsWith("_TOP_FACE")) return "sad";
-  if (event.code.endsWith("_BOTTOM_ARROW_3")) return "wide-up";
-  if (event.code.endsWith("_TOP_ARROW_3")) return "wide-down";
-  if (event.code.endsWith("_BOTTOM_ARROW_2")) return event.version === "1.0" ? "thin-up" : "triangle-up";
-  return event.version === "1.0" ? "thin-down" : "triangle-down";
-};
-
-function DivergenceIcon({
-  kind,
-  version,
-  size = 22,
-}: {
-  kind: DivergenceGlyphKind;
-  version: SignalEvent["version"];
-  size?: number;
-}) {
-  const color = version === "1.0" ? V1_DIVERGENCE_COLOR : V2_DIVERGENCE_COLOR;
-  if (kind === "happy" || kind === "sad") {
-    const filled = version === "2.0";
-    const featureColor = filled ? "#161b22" : color;
-    return (
-      <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true">
-        <circle cx="12" cy="12" r="9" fill={filled ? color : "#161b22"} stroke={color} strokeWidth="2" />
-        <circle cx="9" cy="10" r="1.25" fill={featureColor} />
-        <circle cx="15" cy="10" r="1.25" fill={featureColor} />
-        <path
-          d={kind === "happy" ? "M7.5 14c1.2 2 2.7 3 4.5 3s3.3-1 4.5-3" : "M7.5 17c1.2-2 2.7-3 4.5-3s3.3 1 4.5 3"}
-          stroke={featureColor}
-          strokeWidth="1.8"
-          strokeLinecap="round"
-        />
-      </svg>
-    );
-  }
-  if (kind === "thin-up" || kind === "thin-down") {
-    const up = kind === "thin-up";
-    return (
-      <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true">
-        <path
-          d={up ? "M12 21V4M5 11l7-7 7 7" : "M12 3v17M5 13l7 7 7-7"}
-          stroke={color}
-          strokeWidth="2.4"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        />
-      </svg>
-    );
-  }
-  if (kind === "wide-up" || kind === "wide-down") {
-    return (
-      <svg width={size} height={size} viewBox="0 0 24 24" fill={color} aria-hidden="true">
-        <path d={kind === "wide-up" ? "M12 2 22 12h-6v10H8V12H2L12 2Z" : "M8 2h8v10h6L12 22 2 12h6V2Z"} />
-      </svg>
-    );
-  }
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill={color} aria-hidden="true">
-      <path d={kind === "triangle-up" ? "M12 3 22 20H2L12 3Z" : "M2 4h20L12 21 2 4Z"} />
-    </svg>
-  );
-}
 
 type SignalOverlayItem = {
   key: string;
@@ -257,9 +193,11 @@ export function BacktestSignalChart({
           key: event.code,
           version: event.version,
           label: event.family === "DIVERGENCE" ? undefined : backtestSignalShortLabel(event.code),
-          glyph: event.family === "DIVERGENCE" ? divergenceGlyphKind(event) : undefined,
+          glyph: event.family === "DIVERGENCE"
+            ? divergenceGlyphKind(event.code, event.version) ?? undefined
+            : undefined,
           color: event.family === "DIVERGENCE"
-            ? (event.version === "1.0" ? V1_DIVERGENCE_COLOR : V2_DIVERGENCE_COLOR)
+            ? (event.version === "1.0" ? "#33b1ff" : "#be95ff")
             : (event.direction === "BUY" ? "#42be65" : "#fa4d56"),
         }));
         const rowHeight = 24;

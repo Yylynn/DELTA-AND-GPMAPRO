@@ -24,6 +24,7 @@ data/exports/
 data/market_event_snapshots/
 data/option_chain_snapshots/
 data/stock_pool_snapshots/
+data/stock_pool_data/
 data/gpmapro_trace/
 data/gpma2_trace/
 data/gpmaapro_trace/

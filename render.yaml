@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: delta-gpmapro
+    runtime: docker
+    plan: free
+    region: singapore
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /api/health
+    autoDeployTrigger: commit
+    envVars:
+      - key: DELTA_ENVIRONMENT
+        value: production
+      - key: DELTA_MARKET_DATA_PROVIDER
+        value: yahoo
+      - key: DELTA_NEWS_ENABLED
+        value: "false"
+      - key: DELTA_OPTIONS_ENABLED
+        value: "false"
+      - key: DELTA_STOCK_POOL_ENABLED
+        value: "false"

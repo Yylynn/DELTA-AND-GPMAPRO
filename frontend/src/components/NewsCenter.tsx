@@ -5,6 +5,14 @@ import { MarketCodeInput } from "@/components/MarketCodeInput";
 import { PageHeader, StatusBadge } from "@/components/ui/workspace";
 import { resolveMarketCode, type Market } from "@/lib/marketCode";
 import { OptionsMarketSummary } from "@/components/OptionsMarketSummary";
+import chinaTechCover from "@/assets/news-fallbacks/china-tech.webp";
+import ratesMacroCover from "@/assets/news-fallbacks/rates-macro.webp";
+import equitiesCover from "@/assets/news-fallbacks/equities.webp";
+import aiTechCover from "@/assets/news-fallbacks/ai-tech.webp";
+import cryptoCover from "@/assets/news-fallbacks/crypto.webp";
+import energyCover from "@/assets/news-fallbacks/energy.webp";
+import regulationCover from "@/assets/news-fallbacks/regulation.webp";
+import financeCover from "@/assets/news-fallbacks/finance.webp";
 
 type Action = "BUY" | "ACCUMULATE" | "HOLD" | "REDUCE" | "SELL";
 type Bias = "BULLISH" | "NEUTRAL" | "BEARISH";
@@ -40,6 +48,49 @@ type NewsItem = {
 };
 
 type HeadlineGroup = { id: string; label: string; source_ids: string[]; available: boolean; count: number; items: NewsItem[] };
+
+const headlineFallbackCovers = {
+  china: chinaTechCover,
+  rates: ratesMacroCover,
+  equities: equitiesCover,
+  technology: aiTechCover,
+  crypto: cryptoCover,
+  energy: energyCover,
+  regulation: regulationCover,
+  finance: financeCover,
+} as const;
+
+type HeadlineFallbackTheme = keyof typeof headlineFallbackCovers;
+
+const headlineThemeRules: Array<{ theme: HeadlineFallbackTheme; terms: string[] }> = [
+  { theme: "china", terms: ["中国", "习近平", "北京", "上海", "china", "chinese", "beijing", "shanghai", "xi jinping"] },
+  { theme: "crypto", terms: ["比特币", "以太坊", "加密", "数字资产", "bitcoin", "ethereum", "crypto", "blockchain", "stablecoin"] },
+  { theme: "energy", terms: ["原油", "石油", "天然气", "黄金", "能源", "大宗商品", "oil", "opec", "gas", "gold", "energy", "commodity"] },
+  { theme: "technology", terms: ["人工智能", "芯片", "半导体", "科技", "openai", "artificial intelligence", " ai ", "chip", "semiconductor", "nvidia", "technology"] },
+  { theme: "rates", terms: ["美联储", "央行", "利率", "通胀", "国债", "就业", "fed", "federal reserve", "powell", "interest rate", "inflation", "treasury", "jobs report"] },
+  { theme: "regulation", terms: ["监管", "政策", "法规", "反垄断", "政府", "sec ", "regulation", "regulator", "policy", "antitrust", "government"] },
+  { theme: "equities", terms: ["股票", "股市", "上市", "收购", "并购", "ipo", "stock", "equity", "wall street", "market rally", "merger", "acquisition"] },
+];
+
+function headlineFallbackTheme(item: NewsItem): HeadlineFallbackTheme {
+  const searchable = ` ${item.title} ${item.summary ?? ""} `.toLocaleLowerCase();
+  return headlineThemeRules.find((rule) => rule.terms.some((term) => searchable.includes(term)))?.theme ?? "finance";
+}
+
+function HeadlineCard({ item, primary, onSelect }: { item: NewsItem; primary: boolean; onSelect: (item: NewsItem) => void }) {
+  const theme = headlineFallbackTheme(item);
+  const themeCover = headlineFallbackCovers[theme];
+  const [imageStage, setImageStage] = useState<0 | 1 | 2>(item.thumbnail ? 0 : 1);
+  useEffect(() => setImageStage(item.thumbnail ? 0 : 1), [item.id, item.thumbnail]);
+  const imageSource = imageStage === 0 ? item.thumbnail ?? themeCover : imageStage === 1 ? themeCover : financeCover;
+  const usingFallback = imageStage > 0;
+  return <article className={`market-headline-card ${primary ? "is-primary" : "is-secondary"} has-image ${usingFallback ? "has-fallback-image" : "has-source-image"}`} data-fallback-theme={usingFallback ? theme : undefined}>
+    <img src={imageSource} alt="" loading={primary ? "eager" : "lazy"} fetchPriority={primary ? "high" : "auto"} onError={() => setImageStage((stage) => stage === 0 ? 1 : 2)} />
+    <div className="market-headline-scrim" aria-hidden="true" />
+    {usingFallback && <span className="market-headline-fallback-label">主题配图</span>}
+    <div className="market-headline-content"><div className="market-headline-meta"><span>{item.source || item.publisher}</span><time>{formatTime(item.published_at)}</time></div><h3>{item.title}</h3><div className="market-headline-actions"><button type="button" onClick={() => onSelect(item)}>查看分析</button>{item.url ? <a href={item.url} target="_blank" rel="noreferrer">原文 <ExternalLink size={12} aria-hidden="true" /></a> : <span>无原文链接</span>}</div></div>
+  </article>;
+}
 
 type NewsResponse = {
   symbol: string;
@@ -381,14 +432,9 @@ function HeadlineBoard({ groups, activeSource, onSourceChange, onSelect, status 
   const items = active?.items ?? [];
   const visible = items.slice(0, visibleCount);
   useEffect(() => setVisibleCount(5), [activeSource]);
-  const card = (item: NewsItem, primary: boolean) => <article className={`market-headline-card ${primary ? "is-primary" : "is-secondary"} ${item.thumbnail ? "has-image" : "is-text-only"}`} key={item.id}>
-    {item.thumbnail && <img src={item.thumbnail} alt="" loading={primary ? "eager" : "lazy"} />}
-    <div className="market-headline-scrim" aria-hidden="true" />
-    <div className="market-headline-content"><div className="market-headline-meta"><span>{item.source || item.publisher}</span><time>{formatTime(item.published_at)}</time></div><h3>{item.title}</h3><div className="market-headline-actions"><button type="button" onClick={() => onSelect(item)}>查看分析</button>{item.url ? <a href={item.url} target="_blank" rel="noreferrer">原文 <ExternalLink size={12} aria-hidden="true" /></a> : <span>无原文链接</span>}</div></div>
-  </article>;
   return <section className="market-headline-workspace" aria-label="来源头条"><div className="news-subheading market-headline-heading"><div><h2>今日宏观头条</h2><p>按发布来源查看最新标题，新闻正文不会被抓取。</p></div><StatusBadge tone={status === "LIVE" || status === "CACHED" ? "positive" : status === "STALE_CACHE" ? "warning" : "negative"}>{status === "STALE_CACHE" ? "缓存过期" : status}</StatusBadge></div>
     <div className="market-headline-tabs" role="tablist" aria-label="宏观新闻来源">{groups.map((group) => <button type="button" role="tab" aria-selected={group.id === activeSource} className={group.id === activeSource ? "active" : ""} disabled={!group.available} onClick={() => onSourceChange(group.id)} key={group.id}>{group.label}<span>{group.count}</span></button>)}</div>
-    {visible.length ? <><div className="market-headline-grid">{card(visible[0], true)}<div className="market-headline-secondary-grid">{visible.slice(1, 5).map((item) => card(item, false))}</div></div>{visibleCount < items.length && <button className="news-load-more" type="button" onClick={() => setVisibleCount((count) => count + 5)}>查看更多头条（已显示 {Math.min(visibleCount, items.length)} / {items.length}）</button>}{visible.length > 5 && <div className="market-headline-more">{visible.slice(5).map((item) => card(item, false))}</div>}</> : <div className="news-empty-state compact"><strong>该来源暂无可用头条</strong><span>来源恢复后会在下一次 15 分钟刷新中自动出现。</span></div>}
+    {visible.length ? <><div className="market-headline-grid"><HeadlineCard item={visible[0]} primary onSelect={onSelect} key={visible[0].id} /><div className="market-headline-secondary-grid">{visible.slice(1, 5).map((item) => <HeadlineCard item={item} primary={false} onSelect={onSelect} key={item.id} />)}</div></div>{visibleCount < items.length && <button className="news-load-more" type="button" onClick={() => setVisibleCount((count) => count + 5)}>查看更多头条（已显示 {Math.min(visibleCount, items.length)} / {items.length}）</button>}{visible.length > 5 && <div className="market-headline-more">{visible.slice(5).map((item) => <HeadlineCard item={item} primary={false} onSelect={onSelect} key={item.id} />)}</div>}</> : <div className="news-empty-state compact"><strong>该来源暂无可用头条</strong><span>来源恢复后会在下一次 15 分钟刷新中自动出现。</span></div>}
   </section>;
 }
 

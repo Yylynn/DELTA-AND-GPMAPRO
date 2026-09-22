@@ -13,6 +13,7 @@ export function PageHeader({
   return (
     <header className="page-heading">
       <div>
+        <span className="page-heading-eyebrow">QUANTITATIVE RESEARCH</span>
         <h1>{title}</h1>
         <p>{description}</p>
       </div>

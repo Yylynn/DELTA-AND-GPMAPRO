@@ -5,13 +5,19 @@ import {
   ColorType,
   LineSeries,
   createChart,
-  createSeriesMarkers,
   type IChartApi,
   type LogicalRange,
-  type SeriesMarker,
-  type Time,
 } from "lightweight-charts";
-import { backtestSignalLabel } from "@/components/backtestSignalLabels";
+import {
+  backtestSignalLabel,
+  backtestSignalShortLabel,
+} from "@/components/backtestSignalLabels";
+import {
+  DivergenceIcon,
+  divergenceGlyphKind,
+  type BacktestSignalVersion,
+  type DivergenceGlyphKind,
+} from "@/components/BacktestSignalGlyph";
 import type { BacktestResult, BacktestTrade } from "@/components/backtestResultTypes";
 
 type EquityPoint = { date: string; equity: number };
@@ -22,6 +28,34 @@ type DrawdownPoint = {
 };
 
 type EquityScale = "nav" | "capital";
+type OperationPosition = "above" | "below";
+
+type OperationPoint = {
+  key: string;
+  date: string;
+  position: OperationPosition;
+  color: string;
+  signals: Array<{
+    label?: string;
+    glyph?: DivergenceGlyphKind;
+    version: BacktestSignalVersion;
+  }>;
+  description: string;
+};
+
+type OperationOverlay = {
+  key: string;
+  x: number;
+  y: number;
+  items: Array<{
+    key: string;
+    color: string;
+    label?: string;
+    glyph?: DivergenceGlyphKind;
+    version: BacktestSignalVersion;
+    description: string;
+  }>;
+};
 
 const capital = (value: number) => value.toLocaleString("zh-CN", {
   minimumFractionDigits: 0,
@@ -34,53 +68,54 @@ const percent = (value: number) => `${(value * 100).toFixed(2)}%`;
 const signalList = (signals: string[]) =>
   signals.map(backtestSignalLabel).join(" + ");
 
-const operationMarkers = (
+const compactSignal = (signal: string) => {
+  const version: BacktestSignalVersion = signal.startsWith("V2_") ? "2.0" : "1.0";
+  const glyph = divergenceGlyphKind(signal, version);
+  return glyph
+    ? { glyph, version }
+    : { label: backtestSignalShortLabel(signal), version };
+};
+
+const operationPoints = (
   trades: BacktestTrade[],
   openPosition: BacktestResult["open_position"],
-): SeriesMarker<Time>[] => {
-  const markers: SeriesMarker<Time>[] = [];
-  for (const trade of trades) {
-    markers.push({
-      time: trade.entry_date,
-      position: "belowBar",
-      shape: "arrowUp",
+): OperationPoint[] => {
+  const points: OperationPoint[] = [];
+  trades.forEach((trade, index) => {
+    points.push({
+      key: `trade-${index}-entry`,
+      date: trade.entry_date,
+      position: "below",
       color: "#78a9ff",
-      text: `买 ${signalList(trade.entry_signals)}`,
-      size: 1.2,
+      signals: trade.entry_signals.map(compactSignal),
+      description: `买入 · ${signalList(trade.entry_signals)}`,
     });
     const exitSignals = trade.exit_signals.length
       ? signalList(trade.exit_signals)
       : "最大持有";
-    markers.push({
-      time: trade.exit_date,
-      position: "aboveBar",
-      shape: "arrowDown",
+    const profitable = trade.net_return >= 0;
+    points.push({
+      key: `trade-${index}-exit`,
+      date: trade.exit_date,
+      position: "above",
       color: trade.net_return >= 0 ? "#42be65" : "#fa4d56",
-      text: `卖 ${exitSignals} ${trade.net_return >= 0 ? "+" : ""}${percent(trade.net_return)}`,
-      size: 1.2,
+      signals: trade.exit_signals.length
+        ? trade.exit_signals.map(compactSignal)
+        : [{ label: "退出", version: "1.0" }],
+      description: `${profitable ? "盈利退出" : "亏损退出"} · ${exitSignals} · ${profitable ? "+" : ""}${percent(trade.net_return)}`,
     });
-  }
+  });
   if (openPosition) {
-    markers.push({
-      time: openPosition.entry_date,
-      position: "belowBar",
-      shape: "arrowUp",
+    points.push({
+      key: "open-position-entry",
+      date: openPosition.entry_date,
+      position: "below",
       color: "#78a9ff",
-      text: `买 ${signalList(openPosition.entry_signals)}`,
-      size: 1.2,
+      signals: openPosition.entry_signals.map(compactSignal),
+      description: `买入 · ${signalList(openPosition.entry_signals)}`,
     });
-    if (openPosition.last_date !== openPosition.entry_date) {
-      markers.push({
-        time: openPosition.last_date,
-        position: "aboveBar",
-        shape: "circle",
-        color: openPosition.unrealized_return >= 0 ? "#42be65" : "#fa4d56",
-        text: `持仓 ${openPosition.unrealized_return >= 0 ? "+" : ""}${percent(openPosition.unrealized_return)}`,
-        size: 1.1,
-      });
-    }
   }
-  return markers.sort((left, right) => String(left.time).localeCompare(String(right.time)));
+  return points.sort((left, right) => left.date.localeCompare(right.date));
 };
 
 export function BacktestPerformanceCharts({
@@ -99,6 +134,7 @@ export function BacktestPerformanceCharts({
   const equityHost = useRef<HTMLDivElement | null>(null);
   const drawdownHost = useRef<HTMLDivElement | null>(null);
   const [equityScale, setEquityScale] = useState<EquityScale>("nav");
+  const [operationOverlays, setOperationOverlays] = useState<OperationOverlay[]>([]);
 
   useEffect(() => {
     if (!equityHost.current || !drawdownHost.current) return;
@@ -185,13 +221,50 @@ export function BacktestPerformanceCharts({
       time: point.date,
       value: point.benchmark_drawdown,
     })));
-    const markers = createSeriesMarkers(
-      strategyEquity,
-      operationMarkers(trades, openPosition),
-    );
 
     equityChart.timeScale().fitContent();
     drawdownChart.timeScale().fitContent();
+
+    const equityByDate = new Map(equity.map((point) => [point.date, point.equity]));
+    const points = operationPoints(trades, openPosition);
+    let overlayFrame = 0;
+    const updateOperationOverlays = () => {
+      const groups = new Map<string, OperationPoint[]>();
+      for (const point of points) {
+        const key = `${point.date}:${point.position}`;
+        groups.set(key, [...(groups.get(key) ?? []), point]);
+      }
+      const overlays = [...groups.entries()].flatMap(([key, grouped]) => {
+        const first = grouped[0];
+        const rawEquity = equityByDate.get(first.date);
+        if (rawEquity == null || !equityHost.current) return [];
+        const plottedEquity = equityScale === "nav" ? rawEquity / strategyBase : rawEquity;
+        const x = equityChart.timeScale().timeToCoordinate(first.date);
+        const anchorY = strategyEquity.priceToCoordinate(plottedEquity);
+        if (x == null || anchorY == null || x < 0 || x > equityHost.current.clientWidth) return [];
+        const displayX = Math.max(22, Math.min(equityHost.current.clientWidth - 36, x));
+        const items = grouped.flatMap((point) => point.signals.map((signal, index) => ({
+          key: `${point.key}-${index}`,
+          color: point.color,
+          ...signal,
+          description: point.description,
+        })));
+        const rowHeight = 22;
+        const stackHeight = items.length * rowHeight;
+        const unclampedY = first.position === "below"
+          ? anchorY + 9
+          : anchorY - 9 - stackHeight;
+        const y = Math.max(4, Math.min(equityHost.current.clientHeight - stackHeight - 28, unclampedY));
+        return [{ key, x: displayX, y, items }];
+      });
+      setOperationOverlays(overlays);
+    };
+    const scheduleOperationOverlayUpdate = () => {
+      cancelAnimationFrame(overlayFrame);
+      overlayFrame = requestAnimationFrame(updateOperationOverlays);
+    };
+    equityChart.timeScale().subscribeVisibleLogicalRangeChange(scheduleOperationOverlayUpdate);
+    scheduleOperationOverlayUpdate();
 
     let synchronizing = false;
     const syncRange = (target: IChartApi) => (range: LogicalRange | null) => {
@@ -205,14 +278,15 @@ export function BacktestPerformanceCharts({
     equityChart.timeScale().subscribeVisibleLogicalRangeChange(syncToDrawdown);
     drawdownChart.timeScale().subscribeVisibleLogicalRangeChange(syncToEquity);
 
-    const resizeChart = (chart: IChartApi) =>
+    const resizeChart = (chart: IChartApi, afterResize?: () => void) =>
       new ResizeObserver(([entry]) => {
         chart.applyOptions({
           width: Math.max(1, Math.floor(entry.contentRect.width)),
           height: Math.max(1, Math.floor(entry.contentRect.height)),
         });
+        afterResize?.();
       });
-    const equityResize = resizeChart(equityChart);
+    const equityResize = resizeChart(equityChart, scheduleOperationOverlayUpdate);
     const drawdownResize = resizeChart(drawdownChart);
     equityResize.observe(equityHost.current);
     drawdownResize.observe(drawdownHost.current);
@@ -220,9 +294,10 @@ export function BacktestPerformanceCharts({
     return () => {
       equityResize.disconnect();
       drawdownResize.disconnect();
+      cancelAnimationFrame(overlayFrame);
+      equityChart.timeScale().unsubscribeVisibleLogicalRangeChange(scheduleOperationOverlayUpdate);
       equityChart.timeScale().unsubscribeVisibleLogicalRangeChange(syncToDrawdown);
       drawdownChart.timeScale().unsubscribeVisibleLogicalRangeChange(syncToEquity);
-      markers.detach();
       equityChart.remove();
       drawdownChart.remove();
     };
@@ -264,12 +339,57 @@ export function BacktestPerformanceCharts({
           <span><i className="mr-1 inline-block h-2 w-2 bg-emerald-500" />绿色：盈利退出</span>
           <span><i className="mr-1 inline-block h-2 w-2 bg-rose-500" />红色：亏损退出</span>
         </div>
-        <div
-          ref={equityHost}
-          className="mt-3 h-[420px] w-full md:h-[520px]"
-          role="img"
-          aria-label="可缩放资金曲线"
-        />
+        <div className="relative mt-3 h-[420px] w-full md:h-[520px]">
+          <div
+            ref={equityHost}
+            className="h-full w-full"
+            role="img"
+            aria-label="可缩放资金曲线"
+          />
+          <div
+            className="pointer-events-none absolute inset-0 overflow-hidden"
+            aria-hidden="true"
+            style={{ zIndex: 3 }}
+          >
+            {operationOverlays.map((marker) => (
+              <span
+                className="absolute -translate-x-1/2 drop-shadow-[0_1px_1px_rgba(0,0,0,0.9)]"
+                key={marker.key}
+                style={{
+                  alignItems: "center",
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: 0,
+                  left: marker.x,
+                  top: marker.y,
+                }}
+              >
+                {marker.items.map((item) => (
+                  <span
+                    key={item.key}
+                    title={item.description}
+                    style={{
+                      alignItems: "center",
+                      color: item.color,
+                      display: "flex",
+                      fontSize: 12,
+                      fontWeight: 700,
+                      height: 22,
+                      justifyContent: "center",
+                      lineHeight: "22px",
+                      pointerEvents: "auto",
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    {item.glyph
+                      ? <DivergenceIcon kind={item.glyph} version={item.version} color={item.color} />
+                      : item.label}
+                  </span>
+                ))}
+              </span>
+            ))}
+          </div>
+        </div>
       </section>
 
       <section className="overflow-hidden border border-zinc-800 p-3">

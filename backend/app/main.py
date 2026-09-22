@@ -33,6 +33,8 @@ from app.api.stock_pool import service as stock_pool_service
 from app.api.chanlun import router as chanlun_router
 from app.core.config import get_settings
 from app.services.news_runtime import get_news_service
+from app.web import mount_frontend
+
 settings = get_settings()
 market_news_service = get_news_service()
 
@@ -115,3 +117,7 @@ app.include_router(market_alerts_router, prefix="/api")
 app.include_router(news_router, prefix="/api")
 app.include_router(options_router, prefix="/api")
 app.include_router(stock_pool_router, prefix="/api")
+
+# Keep this mount after every API router so `/api/*` always takes precedence.
+# During local Vite development `frontend/dist` is absent and nothing changes.
+mount_frontend(app)

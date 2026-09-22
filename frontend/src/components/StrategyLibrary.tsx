@@ -73,7 +73,7 @@ export function StrategyLibrary({ onOpenWorkspace }: { onOpenWorkspace: (code: s
   const [keyword, setKeyword] = useState("");
   const [statusFilter, setStatusFilter] = useState<"ALL" | StrategyAvailability>("ALL");
   const [categoryFilter, setCategoryFilter] = useState<"ALL" | StrategyCategory>("ALL");
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(strategyCatalog[0]?.id ?? null);
   const visibleStrategies = useMemo(() => {
     const needle = keyword.trim().toLowerCase();
     return strategyCatalog.filter((strategy) => {
@@ -113,23 +113,21 @@ export function StrategyLibrary({ onOpenWorkspace }: { onOpenWorkspace: (code: s
           </select>
         </label>
       </section>
-      <section className="strategy-library-grid" aria-label="策略目录">
-        {visibleStrategies.map((strategy) => {
-          const status = strategy.availability;
-          return <article className={`strategy-library-card ${selected?.id === strategy.id ? "selected" : ""}`} key={strategy.id}>
-            <div className="strategy-library-card-top">
-              <span>{strategy.category} · {strategy.group} · {strategy.marketScope}</span>
-              <StatusBadge tone={statusTone(status)}>{statusLabels[status]}</StatusBadge>
-            </div>
-            <h2>{strategy.name}</h2>
-            <p>{strategy.adaptationNote}</p>
-            <small>{strategy.version}</small>
-            <button className={status === "READY" ? "primary-button" : "secondary-button"} onClick={() => setSelectedId(strategy.id)}>{status === "READY" ? "使用策略" : "查看适配说明"}</button>
-          </article>;
-        })}
+      <section className="strategy-library-workspace" aria-label="策略目录和详情">
+        <aside className="strategy-library-directory">
+          <div className="strategy-library-directory-heading"><span>策略目录</span><b>{visibleStrategies.length} 项</b></div>
+          <div className="strategy-library-list">
+            {visibleStrategies.map((strategy) => {
+              const status = strategy.availability;
+              return <button type="button" className={`strategy-library-row ${selected?.id === strategy.id ? "selected" : ""}`} onClick={() => setSelectedId(strategy.id)} key={strategy.id}>
+                <span>{strategy.category} · {strategy.marketScope}</span><strong>{strategy.name}</strong><small>{strategy.version}</small><StatusBadge tone={statusTone(status)}>{status === "READY" ? "可用" : "待适配"}</StatusBadge>
+              </button>;
+            })}
+          </div>
+          {!visibleStrategies.length && <section className="strategy-library-empty"><strong>未找到策略</strong><span>请调整搜索词或资料状态。</span></section>}
+        </aside>
+        <div className="strategy-library-detail-wrap">{selected ? <StrategyDetail key={selected.id} strategy={selected} onOpenWorkspace={onOpenWorkspace} /> : <section className="strategy-library-empty"><strong>选择一项策略</strong><span>在左侧目录中选择策略以查看研究说明。</span></section>}</div>
       </section>
-      {!visibleStrategies.length && <section className="strategy-library-empty panel"><strong>未找到策略</strong><span>请调整搜索词或资料状态。</span></section>}
-      {selected && <StrategyDetail key={selected.id} strategy={selected} onOpenWorkspace={onOpenWorkspace} />}
     </div>
   );
 }

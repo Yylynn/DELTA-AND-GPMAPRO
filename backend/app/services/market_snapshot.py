@@ -23,6 +23,13 @@ class MarketDataError(RuntimeError):
     pass
 
 
+YAHOO_US_SYMBOL_ALIASES = {
+    "VIX": "^VIX",
+    "VXN": "^VXN",
+    "VVIX": "^VVIX",
+}
+
+
 class HistorySnapshotProvider(Protocol):
     def fetch_history_snapshot(
         self, code: str, timeframe: str = "1d", adjustment: str = "adjusted",
@@ -70,7 +77,9 @@ class YahooSnapshotService:
             raise ValueError("code must be US.AAPL, HK.00700, SH.600519 or SZ.000001")
         market, symbol = match.groups()
         if market == "US":
-            yahoo = symbol
+            # The UI keeps the provider-neutral/Futu-style code (US.VXN),
+            # while Yahoo prefixes volatility-index tickers with a caret.
+            yahoo = YAHOO_US_SYMBOL_ALIASES.get(symbol, symbol)
         elif market == "HK":
             if not symbol.isdigit():
                 raise ValueError("Hong Kong symbols must be numeric")

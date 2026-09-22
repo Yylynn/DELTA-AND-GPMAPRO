@@ -8,7 +8,7 @@ import {
   type ReactNode,
 } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Button, InlineLoading, Tag, Theme } from "@carbon/react";
+import { InlineLoading, Theme } from "@carbon/react";
 import {
   BarChart3,
   BellRing,
@@ -36,6 +36,7 @@ import { StockPool } from "@/components/StockPool";
 import { StrategyLibrary } from "@/components/StrategyLibrary";
 import { resolveMarketCode, type Market } from "@/lib/marketCode";
 import { SignalInterpretation } from "@/components/SignalInterpretation";
+import brandLockup from "@/assets/delta-brand-lockup-transparent.png";
 import {
   MetricCard,
   MetricValue,
@@ -46,18 +47,20 @@ import {
   TerminalPanel,
 } from "@/components/ui/workspace";
 
+const REQUEST_TIMEOUT_MS = 45_000;
+
 const request = async (path: string, options?: RequestInit) => {
   let response: Response;
   const controller = new AbortController();
-  const timeout = window.setTimeout(() => controller.abort(), 15_000);
+  const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   try {
     response = await fetch(path, { ...options, signal: controller.signal });
   } catch (error) {
     if (error instanceof DOMException && error.name === "AbortError")
-      throw new Error("请求超过 15 秒未返回；请检查网络连接后重试。");
+      throw new Error("请求超过 45 秒未返回；若使用 Render 免费实例，请等待服务唤醒后重试。");
     if (error instanceof TypeError)
       throw new Error(
-        "无法连接本地后端（127.0.0.1:8015）。请运行 02_启动开发版.bat，并保持后端窗口开启。",
+        "无法连接后端服务。线上请稍后重试；本地开发请运行 02_启动开发版.bat 并保持后端窗口开启。",
       );
     throw error;
   } finally {
@@ -299,9 +302,9 @@ function MarketAlertBanner({
       ? "WATCH"
       : "NORMAL";
   const action = (
-    <Button kind="ghost" size="sm" onClick={onCheck} disabled={checking}>
+    <button className="text-button" type="button" onClick={onCheck} disabled={checking}>
       {checking ? <InlineLoading description="刷新中" /> : "立即刷新"}
-    </Button>
+    </button>
   );
   const hasElevatedRisk = Boolean(
     unread.length || (data?.regime && data.regime !== "NORMAL"),
@@ -553,8 +556,33 @@ function MarketVolatilityAlerts({
       ? "WATCH"
       : "NORMAL");
   const regimeLabel = { NORMAL: "正常", WATCH: "重点观察", RISK: "高风险", CRISIS: "危机", DATA_PENDING: "数据待确认" }[regime];
+  const riskScore = Math.max(0, Math.min(100, data?.risk_score ?? 0));
+  const riskHistory = (data?.risk_history ?? []).slice(-10);
+  const riskDelta = riskHistory.length > 1
+    ? riskScore - riskHistory[Math.max(0, riskHistory.length - 6)].risk_score
+    : null;
+  const sortedModules = (data?.modules ?? []).slice().sort((left, right) =>
+    left.score == null && right.score == null ? 0
+      : left.score == null ? 1
+        : right.score == null ? -1
+          : right.score - left.score,
+  );
+  const healthNeedsAttention = Boolean(
+    data?.data_health?.status && data.data_health.status !== "FULL" ||
+    data?.data_health?.missing_core?.length ||
+    data?.data_health?.failures?.length,
+  );
+  const scoreTone = (score: number | null) => score == null
+    ? "unavailable"
+    : score >= 90
+      ? "critical"
+      : score >= 60
+        ? "elevated"
+        : score >= 30
+          ? "watch"
+          : "calm";
   return (
-    <div className="terminal-page">
+    <div className="terminal-page risk-radar-page">
       <PageHeader
         title="市场风险雷达"
         description="Yahoo Finance 公开日线风险雷达；启动和手动刷新时联网，不生成交易指令。"
@@ -577,61 +605,65 @@ function MarketVolatilityAlerts({
           {message}
         </p>
       )}
-      <section className={`risk-command panel panel-risk ${regime === "CRISIS" ? "risk" : regime.toLowerCase()}`}>
-        <div>
-          <span>综合市场风险状态</span>
-          <strong>{regimeLabel}</strong>
-          <p>{data?.risk_transition ?? "等待首次检查"} · {regime === "DATA_PENDING" ? `原始规则状态：${({ NORMAL: "正常", WATCH: "重点观察", RISK: "高风险", CRISIS: "危机" }[data?.raw_regime ?? "NORMAL"])}；关键数据未完整，不作为确认结论。` : data?.evidence?.[0]?.message ?? priorityAlerts[0]?.message ?? "最近一次检查未发现需要优先处理的市场风险事件。"}</p>
+      <section className={`risk-overview risk-regime-${regime.toLowerCase()}`}>
+        <div className="risk-overview-summary">
+          <div className="risk-state-copy">
+            <span>综合市场风险状态</span>
+            <div className="risk-state-value">
+              <strong>{regimeLabel}</strong>
+              <b>{data?.risk_score ?? "—"}<small> / 100</small></b>
+            </div>
+            <p>{data?.risk_transition ?? "等待首次检查"}</p>
+            <p className="risk-state-evidence">{regime === "DATA_PENDING" ? `原始规则状态：${({ NORMAL: "正常", WATCH: "重点观察", RISK: "高风险", CRISIS: "危机" }[data?.raw_regime ?? "NORMAL"])}；关键数据未完整，不作为确认结论。` : data?.evidence?.[0]?.message ?? priorityAlerts[0]?.message ?? "最近一次检查未发现需要优先处理的市场风险事件。"}</p>
+          </div>
+          <div className="risk-scale" aria-label={`综合风险评分 ${riskScore} 分；最终状态 ${regimeLabel}`}>
+            <div className="risk-scale-marker" style={{ left: `${riskScore}%` }}><b>{riskScore}</b></div>
+            <div className="risk-scale-track" aria-hidden="true"><i /><i /><i /><i /></div>
+            <div className="risk-scale-labels"><span><b>正常</b><small>0–25</small></span><span><b>观察</b><small>26–50</small></span><span><b>高风险</b><small>51–75</small></span><span><b>危机</b><small>76–100</small></span></div>
+            <small className="risk-scale-note">刻度表示综合分位置；最终状态仍按模块极值与共振规则判定。</small>
+          </div>
         </div>
-        <div className="risk-command-metrics">
-          <div><span>风险评分</span><b>{data?.risk_score ?? "—"} / 100</b></div>
-          <div><span>活跃预警</span><b>{priorityAlerts.length}</b></div>
-          <div><span>数据健康</span><b>{data?.data_health?.status ?? data?.last_check?.status ?? "等待刷新"}</b></div>
-        </div>
+        <aside className="risk-alert-ledger" aria-label="活跃预警">
+          <div className="risk-section-heading"><div><span>实时优先级</span><h2>活跃预警 <b>{priorityAlerts.length}</b></h2></div><small>按严重度 · 最新优先</small></div>
+          <div className="risk-alert-rows">
+            {priorityAlerts.slice(0, 3).map((alert) => <article className={`risk-alert-row is-${alert.severity.toLowerCase()}`} key={alert.id}><span className="risk-alert-level">{alert.severity === "RISK" ? "高" : "关注"}</span><div><b>{alert.label}</b><p>{alert.message}</p></div><time>{alert.date}</time></article>)}
+            {!priorityAlerts.length && <div className="risk-alert-empty"><b>暂无活跃预警</b><span>当前窗口内没有需要优先处理的风险事件。</span></div>}
+          </div>
+        </aside>
       </section>
-      <section className="panel panel-evidence mb-4 p-4">
-        <PanelHeading title="本次评估解读" description="综合分是可用模块的等权平均；每个模块只取压力最高的一项证据，并非把同类指标相加。" meta={data?.methodology?.version ?? "等待首次计算"} />
-        <div className="mt-3 grid gap-3 lg:grid-cols-3">
-          <article className="rounded border border-zinc-800 p-3 text-xs text-zinc-400"><span className="block text-zinc-500">最终触发</span><b className="mt-1 block text-sm text-zinc-100">{regime === "DATA_PENDING" ? "关键数据未完整，展示状态已降级" : data?.raw_regime === "CRISIS" ? "至少一个模块 ≥ 90 分，触发危机规则" : data?.raw_regime === "RISK" ? "两个以上模块共振且综合分 ≥ 60" : "按综合分与压力模块规则判定"}</b></article>
-          <article className="rounded border border-zinc-800 p-3 text-xs text-zinc-400"><span className="block text-zinc-500">数据门控</span><b className="mt-1 block text-sm text-zinc-100">{data?.data_health?.status === "FULL" ? "关键模块数据完整" : data?.data_health?.missing_core?.length ? `缺少：${data.data_health.missing_core.join("、")}` : "存在辅助数据或提供方问题"}</b></article>
-          <article className="rounded border border-zinc-800 p-3 text-xs text-zinc-400"><span className="block text-zinc-500">使用窗口</span><b className="mt-1 block text-sm text-zinc-100">历史 {data?.methodology?.history_sessions ?? 252} 日 · 变化 {data?.methodology?.change_sessions ?? 5} 日 · 趋势 {data?.methodology?.trend_sessions ?? 20} 日</b></article>
+      <section className="risk-workspace">
+        <div className="risk-contribution-ledger">
+          <div className="risk-section-heading"><div><span>模块压力</span><h2>风险贡献排序</h2></div><p>基于各模块综合得分、历史分位与五日变化，识别当前风险的主要来源。</p></div>
+          <div className="risk-contribution-head"><span>#</span><span>指标（模块）</span><span>风险分数</span><span>关键信号（最强证据）</span><span>简要原因</span></div>
+          <div className="risk-contribution-rows">
+            {sortedModules.map((module, index) => { const evidence = module.evidence[0], tone = scoreTone(module.score); return <article className={`risk-contribution-row tone-${tone}`} key={module.id}><b className="risk-rank">{index + 1}</b><div className="risk-module-name"><b>{module.label}</b><span>{evidence?.label ?? "等待数据"}</span></div><div className="risk-module-score"><span className="risk-score-bar"><i style={{ width: `${module.score ?? 0}%` }} /></span><b>{module.score == null ? "—" : module.score}<small> / 100</small></b></div><div className="risk-module-signal">{evidence?.percentile != null ? `历史分位 ${evidence.percentile}%` : evidence?.trend ?? "数据不可用"}</div><p>{evidence?.message ?? "等待模块数据后生成解释。"}</p></article>; })}
+            {!sortedModules.length && <div className="risk-module-empty">等待首次刷新后生成风险贡献排序。</div>}
+          </div>
         </div>
-        <div className="mt-4 overflow-x-auto">
-          <table>
-            <thead><tr><th>模块 / 最强证据</th><th>当前值</th><th>历史分位</th><th>五日变化</th><th>趋势 / 其他</th><th>分项贡献</th><th>模块分数</th><th>来源 / 日期</th></tr></thead>
-            <tbody>{(data?.modules ?? []).map((module) => { const evidence = module.evidence[0]; return <tr key={`explain-${module.id}`}><td><b>{module.label}</b><span className="block text-xs text-zinc-500">{evidence?.label ?? "无可用证据"}</span></td><td>{evidence?.value ?? "—"}</td><td>{evidence?.percentile == null ? "—" : `${evidence.percentile}%`}</td><td>{evidence?.change_5d == null ? "—" : `${evidence.change_5d >= 0 ? "+" : ""}${evidence.change_5d}%`}</td><td>{evidence?.trend ?? (evidence?.drawdown_pct == null ? "—" : `回撤 ${evidence.drawdown_pct}% · 波动 ${evidence.realized_volatility_pct}%`)}</td><td>{evidence?.contributions ? Object.entries(evidence.contributions).map(([key, value]) => `${key} ${value}`).join(" · ") : "—"}</td><td>{module.score == null ? "—" : `${module.score}/100`}</td><td>{evidence?.source ?? "—"}<span className="block text-xs text-zinc-500">{evidence?.as_of ?? "—"}</span></td></tr>; })}</tbody>
-          </table>
-        </div>
-        <details className="mt-4 rounded border border-zinc-800 p-3" open>
-          <summary className="cursor-pointer text-sm font-semibold text-zinc-100">完整评分方法与边界</summary>
-          <p className="mt-3 text-xs text-zinc-400">{data?.methodology?.aggregation ?? "每模块取最高压力证据，再计算综合分。"}</p>
-          <ul className="mt-2 list-disc space-y-1 pl-5 text-xs text-zinc-400">{(data?.methodology?.regime_rules ?? []).map((rule) => <li key={rule}>{rule}</li>)}<li>{data?.methodology?.data_gate ?? "关键数据缺失时不输出确认性风险结论。"}</li></ul>
-          <p className="mt-3 text-xs text-zinc-500">波动率取绝对阈值、历史分位和五日冲击的最大值；权益由回撤、20 日实现波动率和 50 日趋势组成；利率、信用与全球模块由方向调整后的历史分位、五日变化和趋势加分组成。该规则仅作研究风险监测，不构成投资建议。</p>
+        <aside className="risk-trajectory-panel">
+          <div className="risk-section-heading"><div><span>变化速度</span><h2>风险轨迹</h2></div><small>{riskDelta == null ? "等待更多数据" : `近 5 个交易日 ${riskDelta >= 0 ? "+" : ""}${riskDelta} 点`}</small></div>
+          {riskHistory.length ? <ol className="risk-trajectory-list">{riskHistory.map((item, index) => <li className={`tone-${scoreTone(item.risk_score)}`} key={`${item.date}-${index}`}><time>{item.date.slice(5)}</time><i aria-hidden="true" /><b>{item.risk_score}</b><span>{({ NORMAL: "正常", WATCH: "观察", RISK: "高风险", CRISIS: "危机", DATA_PENDING: "待确认" } as Record<string, string>)[item.regime] ?? item.regime}</span></li>)}</ol> : <div className="risk-trajectory-empty">尚无历史轨迹，刷新后开始记录。</div>}
+          <div className={`risk-health-summary ${healthNeedsAttention ? "needs-attention" : "is-full"}`}><div><span>数据健康</span><b>{data?.data_health?.status ?? data?.last_check?.status ?? "等待刷新"} · {data?.data_health?.available_modules ?? 0}/{data?.data_health?.total_modules ?? 5}</b><small>{healthNeedsAttention ? data?.data_health?.missing_core?.length ? `缺少：${data.data_health.missing_core.join("、")}` : "部分来源需要检查" : "关键数据可用于风险评估"}</small></div><button className="secondary-button" onClick={() => void checkProviders()} disabled={checkingProviders}>{checkingProviders ? "检查中…" : "检查数据源"}</button></div>
+        </aside>
+      </section>
+
+      <div className="risk-disclosures">
+        <details className="risk-disclosure">
+          <summary><span><b>01</b>完整评分方法与边界</span><small>{data?.methodology?.version ?? "等待首次计算"}</small></summary>
+          <div className="risk-disclosure-content">
+            <div className="risk-method-facts"><article><span>最终触发</span><b>{regime === "DATA_PENDING" ? "关键数据未完整，展示状态已降级" : data?.raw_regime === "CRISIS" ? "至少一个模块 ≥ 90 分，触发危机规则" : data?.raw_regime === "RISK" ? "两个以上模块共振且综合分 ≥ 60" : "按综合分与压力模块规则判定"}</b></article><article><span>数据门控</span><b>{data?.data_health?.status === "FULL" ? "关键模块数据完整" : data?.data_health?.missing_core?.length ? `缺少：${data.data_health.missing_core.join("、")}` : "存在辅助数据或提供方问题"}</b></article><article><span>使用窗口</span><b>历史 {data?.methodology?.history_sessions ?? 252} 日 · 变化 {data?.methodology?.change_sessions ?? 5} 日 · 趋势 {data?.methodology?.trend_sessions ?? 20} 日</b></article></div>
+            <p>{data?.methodology?.aggregation ?? "每模块取最高压力证据，再计算综合分。"}</p><ul>{(data?.methodology?.regime_rules ?? []).map((rule) => <li key={rule}>{rule}</li>)}<li>{data?.methodology?.data_gate ?? "关键数据缺失时不输出确认性风险结论。"}</li></ul>
+            <div className="overflow-x-auto"><table><thead><tr><th>模块 / 最强证据</th><th>当前值</th><th>历史分位</th><th>五日变化</th><th>趋势 / 其他</th><th>分项贡献</th><th>模块分数</th><th>来源 / 日期</th></tr></thead><tbody>{(data?.modules ?? []).map((module) => { const evidence = module.evidence[0]; return <tr key={`explain-${module.id}`}><td><b>{module.label}</b><span className="block text-xs">{evidence?.label ?? "无可用证据"}</span></td><td>{evidence?.value ?? "—"}</td><td>{evidence?.percentile == null ? "—" : `${evidence.percentile}%`}</td><td>{evidence?.change_5d == null ? "—" : `${evidence.change_5d >= 0 ? "+" : ""}${evidence.change_5d}%`}</td><td>{evidence?.trend ?? (evidence?.drawdown_pct == null ? "—" : `回撤 ${evidence.drawdown_pct}% · 波动 ${evidence.realized_volatility_pct}%`)}</td><td>{evidence?.contributions ? Object.entries(evidence.contributions).map(([key, value]) => `${key} ${value}`).join(" · ") : "—"}</td><td>{module.score == null ? "—" : `${module.score}/100`}</td><td>{evidence?.source ?? "—"}<span className="block text-xs">{evidence?.as_of ?? "—"}</span></td></tr>; })}</tbody></table></div>
+          </div>
         </details>
-      </section>
-      <section className="panel panel-evidence mb-4 p-4">
-        <PanelHeading title="跨资产压力分解" description="模块内取最强证据，跨模块共振后才升级风险状态" meta={`${data?.data_health?.available_modules ?? 0}/${data?.data_health?.total_modules ?? 5} 个模块可用`} />
-        <div className="grid grid-cols-5 gap-3 text-sm">
-          {(data?.modules ?? []).map((module) => (
-            <article className="rounded border border-zinc-800 p-3" key={module.id}>
-              <span className="block text-xs text-zinc-500">{module.label}</span>
-              <b className="mt-1 block text-lg">{module.score == null ? "数据不可用" : `${module.score} / 100`}</b>
-              <p className="mt-2 text-xs text-zinc-400">{module.evidence[0]?.label ?? "等待数据"} · {module.evidence[0]?.message ?? "—"}</p>
-            </article>
-          ))}
-        </div>
-        {data?.risk_history?.length ? <p className="mt-3 text-xs text-zinc-500">最近风险轨迹：{data.risk_history.map((item) => `${item.date.slice(5)} ${item.risk_score}`).join(" · ")}</p> : null}
-        <div className="mt-3 flex flex-wrap items-center gap-3 text-xs text-zinc-500"><span>提供方连通性：{Object.entries(data?.data_health?.providers ?? {}).map(([name, provider]) => `${name} ${provider.status}`).join(" · ") || "等待检查"}</span><button className="secondary-button" onClick={() => void checkProviders()} disabled={checkingProviders}>{checkingProviders ? "检查中…" : "检查数据源"}</button></div>
-        {data?.data_health?.indicator_sources?.length ? <div className="mt-3 text-xs text-zinc-400"><b className="font-medium text-zinc-300">本次实际采用：</b>{data.data_health.indicator_sources.map((item) => `${item.label} ${item.source}${item.fresh ? "" : "（陈旧）"} · ${item.as_of}`).join("；")}</div> : null}
-        {providerMessage ? <p className="mt-2 text-xs text-zinc-400">{providerMessage}</p> : null}
-        {data?.data_health?.failures?.length ? <p className="mt-2 text-xs text-amber-300">部分数据不可用：{data.data_health.failures.map((item) => `${item.label}${item.fallback ? "（使用陈旧缓存）" : ""}`).join("、")}</p> : null}
-      </section>
-      <section className="panel panel-evidence p-4">
-        <PanelHeading
-          title="指标与触发线"
-          description="自定义风险指标、数据代码与触发阈值"
-          meta="Yahoo Finance · 5 分钟本地缓存"
-        />
+          <details className="risk-disclosure" open={healthNeedsAttention || undefined}>
+          <summary><span><b>02</b>数据源与健康</span><small>{data?.data_health?.status ?? "等待刷新"} · {data?.data_health?.available_modules ?? 0}/{data?.data_health?.total_modules ?? 5}</small></summary>
+          <div className="risk-disclosure-content risk-source-content"><div className="risk-provider-list">{Object.entries(data?.data_health?.providers ?? {}).map(([name, provider]) => <article key={name}><b>{name}</b><span>{provider.status}</span><small>{provider.as_of ?? provider.error ?? (provider.configured ? "已配置" : "未配置")}</small></article>)}</div>{data?.data_health?.indicator_sources?.length ? <p><b>本次实际采用：</b>{data.data_health.indicator_sources.map((item) => `${item.label} ${item.source}${item.fresh ? "" : "（陈旧）"} · ${item.as_of}`).join("；")}</p> : null}{providerMessage ? <p>{providerMessage}</p> : null}{data?.data_health?.failures?.length ? <p className="risk-source-warning">部分数据不可用：{data.data_health.failures.map((item) => `${item.label}${item.fallback ? "（使用陈旧缓存）" : ""}`).join("、")}</p> : null}<button className="secondary-button" onClick={() => void checkProviders()} disabled={checkingProviders}>{checkingProviders ? "检查中…" : "检查数据源"}</button></div>
+        </details>
+      <details className="risk-disclosure">
+        <summary><span><b>03</b>指标与触发线</span><small>Yahoo Finance · 5 分钟本地缓存</small></summary>
+        <div className="risk-disclosure-content risk-config-content">
+        <PanelHeading title="自定义风险指标" description="数据代码与触发阈值" />
         {draft && (
           <>
             <div className="grid grid-cols-5 gap-3 text-xs text-zinc-400">
@@ -706,8 +738,12 @@ function MarketVolatilityAlerts({
             </div>
           </>
         )}
-      </section>
-      <section className="panel panel-evidence mt-4 overflow-hidden">
+        </div>
+      </details>
+      <details className="risk-disclosure">
+        <summary><span><b>04</b>最近观测与技术信号</span><small>观测、技术信号与预警历史</small></summary>
+        <div className="risk-disclosure-content risk-observation-content">
+      <section className="risk-detail-table">
         <div className="panel-title p-4 pb-0">最近观测</div>
         <table>
           <thead>
@@ -756,7 +792,7 @@ function MarketVolatilityAlerts({
           </tbody>
         </table>
       </section>
-      <section className="panel panel-research mt-4 overflow-hidden">
+      <section className="risk-detail-table">
         <div className="panel-title p-4 pb-0">
           波动率 GPMAPRO 技术信号{" "}
           <span className="float-right text-xs font-normal text-zinc-500">
@@ -795,7 +831,7 @@ function MarketVolatilityAlerts({
           </tbody>
         </table>
       </section>
-      <section className="panel panel-research mt-4 overflow-hidden">
+      <section className="risk-detail-table">
         <div className="panel-title p-4 pb-0">
           市场指数技术信号{" "}
           <span className="float-right text-xs font-normal text-zinc-500">
@@ -853,7 +889,7 @@ function MarketVolatilityAlerts({
           </tbody>
         </table>
       </section>
-      <section className="panel panel-risk mt-4 overflow-hidden">
+      <section className="risk-detail-table">
         <div className="panel-title p-4 pb-0">
           预警历史{" "}
           <span className="float-right text-xs font-normal text-zinc-500">
@@ -900,6 +936,9 @@ function MarketVolatilityAlerts({
           </tbody>
         </table>
       </section>
+        </div>
+      </details>
+      </div>
     </div>
   );
 }
@@ -1165,7 +1204,20 @@ function Overview({
         </p>
       )}
       {!snapshotId ? (
-        <section className="empty-state panel panel-evidence"><strong>尚未找到 {symbol} 的可用行情快照</strong><span>使用右上角“拉取”创建不可变市场快照后，系统才会显示 K 线、行动建议与研究证据。</span></section>
+        <section className="overview-empty-composition" aria-live="polite">
+          <div className="overview-empty-chart">
+            <div className="overview-empty-axis" aria-hidden="true" />
+            <div className="overview-empty-copy">
+              <span>MARKET SNAPSHOT</span>
+              <strong>尚未找到 {symbol} 的可用行情快照</strong>
+              <p>使用右上角“拉取”创建不可变市场快照后，系统会在这里呈现 K 线、模型信号与研究结论。</p>
+            </div>
+          </div>
+          <aside className="overview-empty-aside">
+            <span>研究就绪度</span><b>等待市场快照</b><p>数据到位后，系统会生成行动建议、风险提示与证据链。</p>
+            <button className="secondary-button" type="button" onClick={() => void refresh()} disabled={fetching}>{fetching ? "拉取中…" : "拉取行情"}</button>
+          </aside>
+        </section>
       ) : (
         <div className="command-center">
           <MarketStatusBar data={riskData} />
@@ -1571,18 +1623,12 @@ export default function App() {
   const activePage =
     nav.find((item) => item.id === page)?.label ?? "DELTA 时空研究终端";
   return (
-    <Theme theme="g100">
+    <Theme theme="white">
       <main
         className={`workspace-shell ${navigationOpen ? "nav-open" : "nav-collapsed"}`}
       >
         <aside className="workspace-nav" aria-label="主导航">
-          <div className="workspace-brand">
-            <span className="brand-mark">Δ</span>
-            <div>
-              <strong>DELTA</strong>
-              <small>TIME + GPMAPRO</small>
-            </div>
-          </div>
+          <div className="workspace-brand"><img src={brandLockup} alt="DELTA 量化研究终端" /></div>
           <nav>
             {nav.map(({ id, label, Icon }) => (
               <button
@@ -1601,42 +1647,18 @@ export default function App() {
               </button>
             ))}
           </nav>
-          <div className="workspace-nav-footer">
-            <Tag type="cyan" size="sm">
-              RESEARCH MODE
-            </Tag>
-          </div>
+          <div className="workspace-nav-footer"><span>专注量化研究</span><small>让复杂的市场更清晰</small><b>DELTA v2.6.0</b></div>
         </aside>
         <section className="workspace-main">
           <header className="workspace-header">
             <div className="workspace-header-start">
-              <Button
-                kind="ghost"
-                size="sm"
-                hasIconOnly
-                renderIcon={navigationOpen ? ChevronLeft : Menu}
-                iconDescription={navigationOpen ? "收起导航" : "展开导航"}
-                onClick={() => setNavigationOpen((value) => !value)}
-              />
+              <button className="workspace-nav-toggle" type="button" aria-label={navigationOpen ? "收起导航" : "展开导航"} onClick={() => setNavigationOpen((value) => !value)}>{navigationOpen ? <ChevronLeft size={18} /> : <Menu size={18} />}</button>
               <div>
                 <p>量化研究工作台</p>
                 <strong>{activePage}</strong>
               </div>
             </div>
-            <Tag
-              type={
-                (
-                  marketAlerts.data?.active_alerts ??
-                  marketAlerts.data?.alerts ??
-                  []
-                ).some((item) => !item.read && item.severity === "RISK")
-                  ? "red"
-                  : "cyan"
-              }
-              size="sm"
-            >
-              {checking ? "正在检查风险" : "行情与研究分离"}
-            </Tag>
+            <span className="workspace-research-mode">{checking ? "正在检查风险" : "行情与研究分离"}</span>
           </header>
           <MarketAlertBanner
             data={marketAlerts.data}

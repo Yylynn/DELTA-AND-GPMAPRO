@@ -7,7 +7,8 @@ class Settings(BaseSettings):
     cors_origins: str = "http://localhost:5184,http://127.0.0.1:5184"
     news_enabled: bool = True
     news_cache_ttl_seconds: int = 900
-    news_rss_timeout_seconds: int = 15
+    # Keep each upstream news request within the interactive UI budget.
+    news_rss_timeout_seconds: int = 5
     news_cnbc_enabled: bool = True
     news_marketwatch_enabled: bool = True
     news_zh_sentiment_enabled: bool = True

@@ -42,12 +42,37 @@ class RepairFallbackTicker(FakeTicker):
 def test_yahoo_code_mapping_and_validation(tmp_path):
     service = YahooSnapshotService(tmp_path, ticker_factory=lambda _: FakeTicker())
     assert service.normalise_code("AAPL") == ("US.AAPL", "AAPL")
+    assert service.normalise_code("US.VIX") == ("US.VIX", "^VIX")
+    assert service.normalise_code("VXN") == ("US.VXN", "^VXN")
+    assert service.normalise_code("US.VVIX") == ("US.VVIX", "^VVIX")
     assert service.normalise_code("HK.700") == ("HK.700", "0700.HK")
     assert service.normalise_code("HK.00700") == ("HK.00700", "0700.HK")
     assert service.normalise_code("SH.600519") == ("SH.600519", "600519.SS")
     assert service.normalise_code("SZ.000001") == ("SZ.000001", "000001.SZ")
     with pytest.raises(ValueError):
         service.normalise_code("JP.7203")
+
+
+@pytest.mark.parametrize(
+    ("code", "provider_symbol"),
+    [("US.VIX", "^VIX"), ("US.VXN", "^VXN"), ("US.VVIX", "^VVIX")],
+)
+def test_yahoo_volatility_index_snapshot_uses_provider_alias(tmp_path, code, provider_symbol):
+    requested_symbols = []
+    service = YahooSnapshotService(
+        tmp_path,
+        ticker_factory=lambda symbol: requested_symbols.append(symbol) or FakeTicker(),
+    )
+
+    manifest = service.fetch_history_snapshot(
+        code,
+        start="2024-01-01",
+        end="2024-01-08",
+    )
+
+    assert requested_symbols == [provider_symbol]
+    assert manifest["code"] == code
+    assert manifest["provider_symbol"] == provider_symbol
 
 
 def test_yahoo_snapshot_includes_requested_end_and_is_immutable(tmp_path):
