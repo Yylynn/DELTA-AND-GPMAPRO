@@ -16,6 +16,7 @@ import {
 import {
   DivergenceIcon,
   divergenceGlyphKind,
+  type BacktestSignalVersion,
   type DivergenceGlyphKind,
 } from "@/components/BacktestSignalGlyph";
 
@@ -44,7 +45,7 @@ export type SignalEvent = {
 
 type SignalOverlayItem = {
   key: string;
-  version: SignalEvent["version"];
+  divergenceVersion?: BacktestSignalVersion;
   label?: string;
   glyph?: DivergenceGlyphKind;
   color: string;
@@ -189,17 +190,22 @@ export function BacktestSignalChart({
         const uniqueEvents = [...new Map(grouped.map((event) => [event.code, event])).values()]
           .sort((left, right) => signalEventOrder(left) - signalEventOrder(right) || left.code.localeCompare(right.code));
         if (first.direction === "SELL") uniqueEvents.reverse();
-        const items = uniqueEvents.map((event): SignalOverlayItem => ({
-          key: event.code,
-          version: event.version,
-          label: event.family === "DIVERGENCE" ? undefined : backtestSignalShortLabel(event.code),
-          glyph: event.family === "DIVERGENCE"
-            ? divergenceGlyphKind(event.code, event.version) ?? undefined
-            : undefined,
-          color: event.family === "DIVERGENCE"
-            ? (event.version === "1.0" ? "#33b1ff" : "#be95ff")
-            : (event.direction === "BUY" ? "#42be65" : "#fa4d56"),
-        }));
+        const items = uniqueEvents.map((event): SignalOverlayItem => {
+          if (event.family === "DIVERGENCE") {
+            const version: BacktestSignalVersion = event.version === "2.0" ? "2.0" : "1.0";
+            return {
+              key: event.code,
+              divergenceVersion: version,
+              glyph: divergenceGlyphKind(event.code, version) ?? undefined,
+              color: version === "1.0" ? "#33b1ff" : "#be95ff",
+            };
+          }
+          return {
+            key: event.code,
+            label: backtestSignalShortLabel(event.code),
+            color: event.direction === "BUY" ? "#42be65" : "#fa4d56",
+          };
+        });
         const rowHeight = 24;
         const stackHeight = items.length * rowHeight;
         const unclampedY = first.direction === "BUY" ? anchorY + 10 : anchorY - 10 - stackHeight;
@@ -302,8 +308,8 @@ export function BacktestSignalChart({
                     whiteSpace: "nowrap",
                   }}
                 >
-                  {item.glyph
-                    ? <DivergenceIcon kind={item.glyph} version={item.version} />
+                  {item.glyph && item.divergenceVersion
+                    ? <DivergenceIcon kind={item.glyph} version={item.divergenceVersion} />
                     : item.label}
                 </span>
               ))}
